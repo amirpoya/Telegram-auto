@@ -7,6 +7,24 @@ from telegram.ext import (
     ChatMemberHandler, MessageHandler, filters, JobQueue
 )
 
+# --- ADD for Render: tiny health HTTP server (keeps a port open) ---
+import threading, http.server, socketserver
+def start_health_server():
+    port = int(os.environ.get("PORT", "10000"))
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+        def log_message(self, *args, **kwargs):
+            return
+    def serve():
+        with socketserver.TCPServer(("", port), Handler) as httpd:
+            httpd.allow_reuse_address = True
+            httpd.serve_forever()
+    threading.Thread(target=serve, daemon=True).start()
+# -------------------------------------------------------------------
+
 # Load credentials from env
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OWNER_IDS_ENV = os.getenv("OWNER_IDS", "").strip()
@@ -78,7 +96,6 @@ async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
             else:
                 await context.bot.send_message(chat_id=gid, text=msg, reply_markup=kb)
         except Exception:
-            # maybe removed or no permission -> drop it
             if gid in store["groups"]:
                 store["groups"].remove(gid)
                 save_store()
@@ -242,12 +259,13 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("clear_buttons", cmd_clear_buttons))
 
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
-
-    # swallow any commands in groups
     app.add_handler(MessageHandler(filters.COMMAND & filters.ChatType.GROUPS, lambda u, c: None))
 
-    # initial job
     reschedule_job(app)
+
+    # NEW lines for Render:
+    start_health_server()
+    print("Health server started on PORT =", os.environ.get("PORT", "10000"))
 
     print("Bot is running on Render...")
     app.run_polling()
