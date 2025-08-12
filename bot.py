@@ -1,29 +1,11 @@
 #!/usr/bin/env python3
 import json, os, re
-from typing import List, Tuple, Dict, Any, Set
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from typing import List, Tuple, Dict, Any
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity
 from telegram.ext import (
     Application, CommandHandler, ContextTypes,
     ChatMemberHandler, MessageHandler, filters, JobQueue
 )
-
-# --- ADD for Render: tiny health HTTP server (keeps a port open) ---
-import threading, http.server, socketserver
-def start_health_server():
-    port = int(os.environ.get("PORT", "10000"))
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"ok")
-        def log_message(self, *args, **kwargs):
-            return
-    def serve():
-        with socketserver.TCPServer(("", port), Handler) as httpd:
-            httpd.allow_reuse_address = True
-            httpd.serve_forever()
-    threading.Thread(target=serve, daemon=True).start()
-# -------------------------------------------------------------------
 
 # Load credentials from env
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -39,8 +21,9 @@ DEFAULTS = {
     "seconds": 15 * 60,
     "enabled": False,
     "groups": [],
-    "buttons": [],     # [["SHOP BOT","https://t.me/YourShopBot"], ...]
-    "photo": None      # URL or file_id
+    "buttons": [],
+    "photo": None,
+    "entities": []
 }
 
 def load_store() -> Dict[str, Any]:
@@ -56,6 +39,7 @@ def load_store() -> Dict[str, Any]:
         data.setdefault(k, v)
     if not isinstance(data.get("groups"), list): data["groups"] = []
     if not isinstance(data.get("buttons"), list): data["buttons"] = []
+    if not isinstance(data.get("entities"), list): data["entities"] = []
     return data
 
 store: Dict[str, Any] = load_store()
@@ -85,16 +69,38 @@ def build_keyboard() -> InlineKeyboardMarkup | None:
 async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
     if not store["enabled"]:
         return
-    msg = store["message"]
+    msg_text = store["message"]
     photo = store.get("photo")
     kb = build_keyboard()
+
+    ent_objs = []
+    for d in store.get("entities", []):
+        ent_objs.append(MessageEntity(
+            type=d["type"],
+            offset=d["offset"],
+            length=d["length"],
+            url=d.get("url"),
+            language=d.get("language")
+        ))
+
     groups = list(set(store["groups"]))
     for gid in groups:
         try:
             if photo:
-                await context.bot.send_photo(chat_id=gid, photo=photo, caption=msg, reply_markup=kb)
+                await context.bot.send_photo(
+                    chat_id=gid,
+                    photo=photo,
+                    caption=msg_text,
+                    reply_markup=kb,
+                    caption_entities=ent_objs
+                )
             else:
-                await context.bot.send_message(chat_id=gid, text=msg, reply_markup=kb)
+                await context.bot.send_message(
+                    chat_id=gid,
+                    text=msg_text,
+                    reply_markup=kb,
+                    entities=ent_objs
+                )
         except Exception:
             if gid in store["groups"]:
                 store["groups"].remove(gid)
@@ -152,13 +158,42 @@ async def cmd_disable(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Global auto-posting disabled ⏹️")
 
 async def cmd_set_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update): return
-    text = " ".join(context.args) if context.args else ""
-    if not text:
-        return await update.message.reply_text("Usage: /set_message Hello everyone!")
+    if not is_owner(update):
+        return
+    msg = update.effective_message
+    raw = msg.text or ""
+    space_idx = raw.find(" ")
+    text = raw[space_idx + 1:] if space_idx != -1 else ""
+
+    if not text.strip():
+        return await msg.reply_text("Usage: /set_message Your text (supports Telegram formatting)")
+
+    ents = []
+    if msg.entities:
+        start = space_idx + 1 if space_idx != -1 else len(raw)
+        for e in msg.entities:
+            if e.type == "bot_command":
+                continue
+            if e.offset + e.length <= start:
+                continue
+            new_offset = max(0, e.offset - start)
+            new_length = e.length - max(0, start - e.offset)
+            if new_length > 0:
+                d = {
+                    "type": e.type,
+                    "offset": new_offset,
+                    "length": new_length
+                }
+                if e.url:
+                    d["url"] = e.url
+                if e.language:
+                    d["language"] = e.language
+                ents.append(d)
+
     store["message"] = text
+    store["entities"] = ents
     save_store()
-    await update.message.reply_text("Global message updated ✍️")
+    await msg.reply_text("Global message updated ✍️ (formatting preserved)")
 
 async def cmd_set_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update): return
@@ -197,15 +232,11 @@ def parse_buttons_arg(s: str) -> List[Tuple[str, str]]:
 async def cmd_set_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update): return
     if not context.args:
-        return await update.message.reply_text(
-            "Usage: /set_buttons Label1|https://a;Label2|https://b"
-        )
+        return await update.message.reply_text("Usage: /set_buttons Label1|https://a;Label2|https://b")
     try:
         pairs = parse_buttons_arg(" ".join(context.args))
     except ValueError:
-        return await update.message.reply_text(
-            "Invalid format. Example:\n/set_buttons Shop|https://t.me/YourBot; Group|https://t.me/YourGroup"
-        )
+        return await update.message.reply_text("Invalid format. Example:\n/set_buttons Shop|https://t.me/YourBot; Group|https://t.me/YourGroup")
     store["buttons"] = [list(p) for p in pairs][:8]
     save_store()
     await update.message.reply_text("Buttons updated 🔘")
@@ -257,15 +288,10 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("set_buttons", cmd_set_buttons))
     app.add_handler(CommandHandler("add_button", cmd_add_button))
     app.add_handler(CommandHandler("clear_buttons", cmd_clear_buttons))
-
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.COMMAND & filters.ChatType.GROUPS, lambda u, c: None))
 
     reschedule_job(app)
-
-    # NEW lines for Render:
-    start_health_server()
-    print("Health server started on PORT =", os.environ.get("PORT", "10000"))
 
     print("Bot is running on Render...")
     app.run_polling()
