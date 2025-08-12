@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, os, re
+import json, os, re, asyncio
 from typing import List, Tuple, Dict, Any
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity
 from telegram.ext import (
@@ -7,11 +7,39 @@ from telegram.ext import (
     ChatMemberHandler, MessageHandler, filters, JobQueue
 )
 
-# Load credentials from env
+# ---- Health HTTP server so Render sees an open port ----
+import threading, http.server, socketserver
+def start_health_server():
+    port = int(os.environ.get("PORT", "10000"))
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+        def log_message(self, *a, **k): return
+    def serve():
+        with socketserver.TCPServer(("", port), Handler) as httpd:
+            httpd.allow_reuse_address = True
+            httpd.serve_forever()
+    threading.Thread(target=serve, daemon=True).start()
+# --------------------------------------------------------
+
+# ---- Self keepalive: ping PUBLIC_URL every 4 minutes ----
+import aiohttp
+async def _keepalive(context: ContextTypes.DEFAULT_TYPE):
+    url = os.getenv("PUBLIC_URL", "").strip()
+    if not url: return
+    try:
+        tout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=tout) as s:
+            async with s.get(url) as r:
+                await r.read()
+    except Exception:
+        pass
+# --------------------------------------------------------
+
+# Load credentials
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OWNER_IDS_ENV = os.getenv("OWNER_IDS", "").strip()
 OWNER_IDS = {int(x) for x in OWNER_IDS_ENV.split(",") if x.strip().isdigit()}
-
 if not TOKEN or not OWNER_IDS:
     raise SystemExit("BOT_TOKEN and OWNER_IDS env vars are required. Example OWNER_IDS='123,456'")
 
@@ -21,9 +49,9 @@ DEFAULTS = {
     "seconds": 15 * 60,
     "enabled": False,
     "groups": [],
-    "buttons": [],
-    "photo": None,
-    "entities": []
+    "buttons": [],     # [["SHOP BOT","https://t.me/YourShopBot"], ...]
+    "photo": None,     # URL or file_id
+    "entities": []     # Telegram entities for formatting (bold, italic, link, quote, ...)
 }
 
 def load_store() -> Dict[str, Any]:
@@ -61,8 +89,7 @@ def parse_interval(s: str) -> int:
 
 def build_keyboard() -> InlineKeyboardMarkup | None:
     btns: List[List[str]] = store.get("buttons", [])
-    if not btns:
-        return None
+    if not btns: return None
     rows = [[InlineKeyboardButton(text=label, url=url)] for label, url in btns]
     return InlineKeyboardMarkup(rows)
 
@@ -73,38 +100,23 @@ async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
     photo = store.get("photo")
     kb = build_keyboard()
 
-    ent_objs = []
-    for d in store.get("entities", []):
-        ent_objs.append(MessageEntity(
-            type=d["type"],
-            offset=d["offset"],
-            length=d["length"],
-            url=d.get("url"),
-            language=d.get("language")
-        ))
+    # restore entities
+    ent_objs = [MessageEntity(type=d["type"], offset=d["offset"], length=d["length"],
+                              url=d.get("url"), language=d.get("language"))
+                for d in store.get("entities", [])]
 
-    groups = list(set(store["groups"]))
-    for gid in groups:
+    for gid in list(set(store["groups"])):
         try:
             if photo:
-                await context.bot.send_photo(
-                    chat_id=gid,
-                    photo=photo,
-                    caption=msg_text,
-                    reply_markup=kb,
-                    caption_entities=ent_objs
-                )
+                await context.bot.send_photo(chat_id=gid, photo=photo, caption=msg_text,
+                                             reply_markup=kb, caption_entities=ent_objs)
             else:
-                await context.bot.send_message(
-                    chat_id=gid,
-                    text=msg_text,
-                    reply_markup=kb,
-                    entities=ent_objs
-                )
+                await context.bot.send_message(chat_id=gid, text=msg_text,
+                                               reply_markup=kb, entities=ent_objs)
         except Exception:
+            # if failed (kicked/no permission) drop the group
             if gid in store["groups"]:
-                store["groups"].remove(gid)
-                save_store()
+                store["groups"].remove(gid); save_store()
 
 def reschedule_job(app: Application):
     for j in app.job_queue.get_jobs_by_name("GLOBAL_POSTER"):
@@ -113,8 +125,7 @@ def reschedule_job(app: Application):
         app.job_queue.run_repeating(send_to_all_groups, interval=store["seconds"], first=0, name="GLOBAL_POSTER")
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
+    if update.effective_chat.type != "private": return
     if not is_owner(update):
         return await update.message.reply_text("Hi! Only the bot owners can change settings.")
     await update.message.reply_text(
@@ -145,26 +156,23 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_enable(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update): return
-    store["enabled"] = True
-    save_store()
+    store["enabled"] = True; save_store()
     reschedule_job(context.application)
     await update.message.reply_text("Global auto-posting enabled ✅")
 
 async def cmd_disable(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update): return
-    store["enabled"] = False
-    save_store()
+    store["enabled"] = False; save_store()
     reschedule_job(context.application)
     await update.message.reply_text("Global auto-posting disabled ⏹️")
 
+# keep full formatting from Telegram message (no HTML typing needed)
 async def cmd_set_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update):
-        return
+    if not is_owner(update): return
     msg = update.effective_message
     raw = msg.text or ""
     space_idx = raw.find(" ")
     text = raw[space_idx + 1:] if space_idx != -1 else ""
-
     if not text.strip():
         return await msg.reply_text("Usage: /set_message Your text (supports Telegram formatting)")
 
@@ -172,22 +180,14 @@ async def cmd_set_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.entities:
         start = space_idx + 1 if space_idx != -1 else len(raw)
         for e in msg.entities:
-            if e.type == "bot_command":
-                continue
-            if e.offset + e.length <= start:
-                continue
+            if e.type == "bot_command": continue
+            if e.offset + e.length <= start: continue
             new_offset = max(0, e.offset - start)
             new_length = e.length - max(0, start - e.offset)
             if new_length > 0:
-                d = {
-                    "type": e.type,
-                    "offset": new_offset,
-                    "length": new_length
-                }
-                if e.url:
-                    d["url"] = e.url
-                if e.language:
-                    d["language"] = e.language
+                d = {"type": e.type, "offset": new_offset, "length": new_length}
+                if e.url: d["url"] = e.url
+                if e.language: d["language"] = e.language
                 ents.append(d)
 
     store["message"] = text
@@ -201,12 +201,10 @@ async def cmd_set_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Usage: /set_interval 15m")
     try:
         seconds = parse_interval(context.args[0])
-        if seconds < 60:
-            return await update.message.reply_text("Minimum interval is 60 seconds.")
+        if seconds < 60: return await update.message.reply_text("Minimum interval is 60 seconds.")
     except ValueError as e:
         return await update.message.reply_text(str(e))
-    store["seconds"] = seconds
-    save_store()
+    store["seconds"] = seconds; save_store()
     reschedule_job(context.application)
     await update.message.reply_text("Global interval updated ⏱️")
 
@@ -236,7 +234,9 @@ async def cmd_set_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         pairs = parse_buttons_arg(" ".join(context.args))
     except ValueError:
-        return await update.message.reply_text("Invalid format. Example:\n/set_buttons Shop|https://t.me/YourBot; Group|https://t.me/YourGroup")
+        return await update.message.reply_text(
+            "Invalid format. Example:\n/set_buttons Shop|https://t.me/YourBot; Group|https://t.me/YourGroup"
+        )
     store["buttons"] = [list(p) for p in pairs][:8]
     save_store()
     await update.message.reply_text("Buttons updated 🔘")
@@ -251,14 +251,12 @@ async def cmd_add_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Invalid format. Use: Label|https://...")
     if len(store["buttons"]) >= 8:
         return await update.message.reply_text("Max 8 buttons allowed.")
-    store["buttons"].append([label, url])
-    save_store()
+    store["buttons"].append([label, url]); save_store()
     await update.message.reply_text("Button added ➕")
 
 async def cmd_clear_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update): return
-    store["buttons"] = []
-    save_store()
+    store["buttons"] = []; save_store()
     await update.message.reply_text("All buttons cleared ❌")
 
 async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -266,14 +264,14 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = update.my_chat_member.new_chat_member.status
     if status in ("member", "administrator", "restricted"):
         if chat.id not in store["groups"]:
-            store["groups"].append(chat.id)
-            save_store()
+            store["groups"].append(chat.id); save_store()
     else:
         if chat.id in store["groups"]:
-            store["groups"].remove(chat.id)
-            save_store()
+            store["groups"].remove(chat.id); save_store()
 
 if __name__ == "__main__":
+    start_health_server()  # port open for Render
+
     jq = JobQueue()
     app = Application.builder().token(TOKEN).job_queue(jq).build()
     jq.set_application(app)
@@ -291,7 +289,9 @@ if __name__ == "__main__":
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.COMMAND & filters.ChatType.GROUPS, lambda u, c: None))
 
+    # schedule poster + internal keepalive
     reschedule_job(app)
+    app.job_queue.run_repeating(_keepalive, interval=240, first=10, name="KEEPALIVE")
 
-    print("Bot is running on Render...")
+    print("Bot is running on Render…")
     app.run_polling()
