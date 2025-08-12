@@ -293,8 +293,7 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(
             "❓ راهنمای سریع:\n"
             "• افزودن گروه: دکمه یا دستور /add_group_link\n"
-            "• تنظیم پیام
-            ": دکمه یا دستور /set_message\n"
+            "• تنظیم پیام: دکمه یا دستور /set_message\n"
             "• تنظیم فاصله: دکمه یا دستور /set_interval\n"
             "• تنظیم عکس: دکمه یا دستور /set_photo\n"
             "• مدیریت دکمه‌ها: دکمه یا دستور /set_buttons\n"
