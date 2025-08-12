@@ -182,46 +182,45 @@ def reschedule_job(app: Application):
 
 # ---------------- Menu & Interactive UX -------------------------------------
 MAIN_MENU = InlineKeyboardMarkup([
-    [InlineKeyboardButton("⚡ وضعیت", callback_data="m:status"),
-     InlineKeyboardButton("✅ فعال", callback_data="m:enable"),
-     InlineKeyboardButton("⏹️ غیرفعال", callback_data="m:disable")],
-    [InlineKeyboardButton("⏰ فاصله ارسال", callback_data="m:interval"),
-     InlineKeyboardButton("✍️ پیام", callback_data="m:message")],
-    [InlineKeyboardButton("🖼️ عکس", callback_data="m:photo"),
-     InlineKeyboardButton("🔘 دکمه‌ها", callback_data="m:buttons")],
-    [InlineKeyboardButton("👥 گروه‌ها", callback_data="m:groups"),
-     InlineKeyboardButton("❓ راهنما", callback_data="m:help")]
+    [InlineKeyboardButton("⚡ Status", callback_data="m:status"),
+     InlineKeyboardButton("✅ Enable", callback_data="m:enable"),
+     InlineKeyboardButton("⏹️ Disable", callback_data="m:disable")],
+    [InlineKeyboardButton("⏰ Interval", callback_data="m:interval"),
+     InlineKeyboardButton("✍️ Message", callback_data="m:message")],
+    [InlineKeyboardButton("🖼️ Photo", callback_data="m:photo"),
+     InlineKeyboardButton("🔘 Buttons", callback_data="m:buttons")],
+    [InlineKeyboardButton("👥 Groups", callback_data="m:groups"),
+     InlineKeyboardButton("❓ Help", callback_data="m:help")]
 ])
 
 def status_text():
     mins = store["seconds"] // 60
     btns = "\n".join([f"▫️ {l} → {u}" for l, u in store["buttons"]]) or "-"
     return (
-        f"✨ <b>وضعیت:</b> {'فعال ✅' if store['enabled'] else 'غیرفعال ⏹️'}\n"
-        f"⏰ فاصله: <code>{store['seconds']}</code> ثانیه (~{mins} دقیقه)\n"
-        f"🖼️ عکس: <code>{store['photo'] or 'ندارد'}</code>\n"
-        f"✍️ پیام:\n<code>{store['message']}</code>\n"
-        f"\n🔘 دکمه‌ها:\n{btns}\n"
-        f"\n👥 تعداد گروه: <b>{len(store['groups'])}</b>"
+        f"✨ <b>Status:</b> {'Enabled ✅' if store['enabled'] else 'Disabled ⏹️'}\n"
+        f"⏰ Interval: <code>{store['seconds']}</code> sec (~{mins} min)\n"
+        f"🖼️ Photo: <code>{store['photo'] or 'None'}</code>\n"
+        f"✍️ Message:\n<code>{store['message']}</code>\n"
+        f"\n🔘 Buttons:\n{btns}\n"
+        f"\n👥 Groups count: <b>{len(store['groups'])}</b>"
     )
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
     if not is_owner(update):
-        return await update.message.reply_text("سلام! فقط مدیران ربات امکان تغییر تنظیمات را دارند.")
-    await update.message.reply_text("🌟 منوی مدیریت ربات:", reply_markup=MAIN_MENU, parse_mode="HTML")
+        return await update.message.reply_text("Hi! Only bot owners can change settings.")
+    await update.message.reply_text("🌟 Bot Management Menu:", reply_markup=MAIN_MENU, parse_mode="HTML")
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update): return
-    await update.message.reply_text("🌟 منوی مدیریت ربات:", reply_markup=MAIN_MENU, parse_mode="HTML")
+    await update.message.reply_text("🌟 Bot Management Menu:", reply_markup=MAIN_MENU, parse_mode="HTML")
 
 async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not (update.effective_user and update.effective_user.id in OWNER_IDS):
         return
     q = update.callback_query
     data = q.data or ""
-    # Reset context flag
     context.user_data.clear()
 
     if data == "m:status":
@@ -230,119 +229,120 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data == "m:enable":
         store["enabled"] = True; save_store(); reschedule_job(context.application)
-        await q.answer("فعال شد")
-        await q.edit_message_text("ارسال خودکار پیام فعال شد ✅", reply_markup=MAIN_MENU)
+        await q.answer("Enabled")
+        await q.edit_message_text("Auto-posting enabled ✅", reply_markup=MAIN_MENU)
         return
     if data == "m:disable":
         store["enabled"] = False; save_store(); reschedule_job(context.application)
-        await q.answer("غیرفعال شد")
-        await q.edit_message_text("ارسال خودکار پیام غیرفعال شد ⏹️", reply_markup=MAIN_MENU)
+        await q.answer("Disabled")
+        await q.edit_message_text("Auto-posting disabled ⏹️", reply_markup=MAIN_MENU)
         return
     if data == "m:interval":
         await q.answer()
-        await q.edit_message_text("⏰ فاصله زمانی پیام را ارسال کنید (مثال: 15m یا 2h یا 90)\nحداقل 60 ثانیه.", reply_markup=None)
+        await q.edit_message_text("⏰ Please send the interval (e.g. 15m, 2h, 90)\nMinimum is 60 seconds.", reply_markup=None)
         context.user_data["awaiting_interval"] = True
         return
     if data == "m:message":
         await q.answer()
-        await q.edit_message_text("✍️ پیام جدید را ارسال کنید (فرمت و استایل تلگرام حفظ می‌شود).", reply_markup=None)
+        await q.edit_message_text("✍️ Please send the new message (Telegram formatting preserved).", reply_markup=None)
         context.user_data["awaiting_message"] = True
         return
     if data == "m:photo":
         await q.answer()
-        await q.edit_message_text("🖼️ عکس را ارسال کنید (لینک یا file_id یا none).", reply_markup=None)
+        await q.edit_message_text("🖼️ Send photo link, file_id or 'none'.", reply_markup=None)
         context.user_data["awaiting_photo"] = True
         return
     if data == "m:buttons":
-        btns = "\n".join([f"▫️ {l} → {u}" for l, u in store["buttons"]]) or "ندارد"
-        await q.answer()
+        btns = "\n".join([f"▫️ {l} → {u}" for l, u in store["buttons"]]) or "None"
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ افزودن دکمه", callback_data="b:add")],
-            [InlineKeyboardButton("🧹 پاک‌کردن همه دکمه‌ها", callback_data="b:clear")],
-            [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="m:menu")]
+            [InlineKeyboardButton("➕ Add Button", callback_data="b:add")],
+            [InlineKeyboardButton("🧹 Clear All Buttons", callback_data="b:clear")],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data="m:menu")]
         ] + [
-            [InlineKeyboardButton(f"❌ حذف: {label}", callback_data=f"b:del:{i}")]
+            [InlineKeyboardButton(f"❌ Remove: {label}", callback_data=f"b:del:{i}")]
             for i, (label, url) in enumerate(store["buttons"])
         ])
-        await q.edit_message_text(f"🔘 دکمه‌های فعلی:\n{btns}\n\nبرای مدیریت، از دکمه‌ها استفاده کنید.", reply_markup=kb)
+        await q.answer()
+        await q.edit_message_text(f"🔘 Current buttons:\n{btns}\n\nUse buttons below to manage.", reply_markup=kb)
         return
     if data == "m:groups":
         ids = store.get("groups", [])
         if not ids:
             await q.answer()
-            await q.edit_message_text("هیچ گروهی ثبت نشده است.\nبرای افزودن، دکمه زیر را بزنید.", reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("➕ افزودن گروه", callback_data="g:add")],
-                [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="m:menu")]
+            await q.edit_message_text("No groups added yet.\nUse the button below to add.", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Add Group", callback_data="g:add")],
+                [InlineKeyboardButton("🔙 Back to Menu", callback_data="m:menu")]
             ]))
             return
         kb = [
-            [InlineKeyboardButton("➕ افزودن گروه جدید", callback_data="g:add")],
-            [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="m:menu")]
+            [InlineKeyboardButton("➕ Add Group", callback_data="g:add")],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data="m:menu")]
         ] + [
-            [InlineKeyboardButton(f"❌ حذف {gid}", callback_data=f"g:del:{gid}")]
+            [InlineKeyboardButton(f"❌ Remove {gid}", callback_data=f"g:del:{gid}")]
             for gid in ids
         ]
         await q.answer()
         await q.edit_message_text(
-            "👥 گروه‌های ثبت‌شده:\n" + "\n".join([str(x) for x in ids]) + "\n\nبرای مدیریت از دکمه‌ها استفاده کنید.",
+            "👥 Added Groups:\n" + "\n".join([str(x) for x in ids]) + "\n\nUse buttons below to manage.",
             reply_markup=InlineKeyboardMarkup(kb)
         )
         return
     if data == "m:help":
         await q.answer()
         await q.edit_message_text(
-            "❓ راهنمای سریع:\n"
-            "• افزودن گروه: دکمه یا دستور /add_group_link\n"
-            "• تنظیم پیام: دکمه یا دستور /set_message\n"
-            "• تنظیم فاصله: دکمه یا دستور /set_interval\n"
-            "• تنظیم عکس: دکمه یا دستور /set_photo\n"
-            "• مدیریت دکمه‌ها: دکمه یا دستور /set_buttons\n"
-            "• فعال/غیرفعال: دکمه‌های مربوطه\n"
-            "• حذف گروه: دکمه حذف کنار هر گروه\n"
-            "• حذف دکمه: دکمه حذف کنار هر دکمه\n",
+            """❓ Quick Guide:
+• Add Group: Button or /add_group_link
+• Set Message: Button or /set_message
+• Set Interval: Button or /set_interval
+• Set Photo: Button or /set_photo
+• Manage Buttons: Button or /set_buttons
+• Enable/Disable: Related buttons
+• Remove Group: Remove button beside each group
+• Remove Button: Remove button beside each button
+""",
             reply_markup=MAIN_MENU
         )
         return
     if data == "m:menu":
         await q.answer()
-        await q.edit_message_text("🌟 منوی مدیریت ربات:", reply_markup=MAIN_MENU, parse_mode="HTML")
+        await q.edit_message_text("🌟 Bot Management Menu:", reply_markup=MAIN_MENU, parse_mode="HTML")
         return
 
     # BUTTONS management
     if data.startswith("b:add"):
         await q.answer()
-        await q.edit_message_text("برای افزودن دکمه، مقدار را به صورت زیر ارسال کنید:\nLabel|https://url", reply_markup=None)
+        await q.edit_message_text("To add a button, send: Label|https://url", reply_markup=None)
         context.user_data["awaiting_button"] = True
         return
     if data.startswith("b:del:"):
         idx = int(data.split(":")[2])
         if 0 <= idx < len(store["buttons"]):
             store["buttons"].pop(idx); save_store()
-        btns = "\n".join([f"▫️ {l} → {u}" for l, u in store["buttons"]]) or "ندارد"
+        btns = "\n".join([f"▫️ {l} → {u}" for l, u in store["buttons"]]) or "None"
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ افزودن دکمه", callback_data="b:add")],
-            [InlineKeyboardButton("🧹 پاک‌کردن همه دکمه‌ها", callback_data="b:clear")],
-            [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="m:menu")]
+            [InlineKeyboardButton("➕ Add Button", callback_data="b:add")],
+            [InlineKeyboardButton("🧹 Clear All Buttons", callback_data="b:clear")],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data="m:menu")]
         ] + [
-            [InlineKeyboardButton(f"❌ حذف: {label}", callback_data=f"b:del:{i}")]
+            [InlineKeyboardButton(f"❌ Remove: {label}", callback_data=f"b:del:{i}")]
             for i, (label, url) in enumerate(store["buttons"])
         ])
-        await q.answer("دکمه حذف شد")
-        await q.edit_message_text(f"🔘 دکمه‌های فعلی:\n{btns}\n\nبرای مدیریت، از دکمه‌ها استفاده کنید.", reply_markup=kb)
+        await q.answer("Button removed")
+        await q.edit_message_text(f"🔘 Current buttons:\n{btns}\n\nUse buttons below to manage.", reply_markup=kb)
         return
     if data.startswith("b:clear"):
         store["buttons"] = []; save_store()
-        await q.answer("همه دکمه‌ها حذف شد")
-        await q.edit_message_text("همه دکمه‌ها حذف شدند.\nمی‌توانید دکمه جدید اضافه کنید.", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ افزودن دکمه", callback_data="b:add")],
-            [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="m:menu")]
+        await q.answer("All buttons cleared")
+        await q.edit_message_text("All buttons cleared. You can add new ones.", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Add Button", callback_data="b:add")],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data="m:menu")]
         ]))
         return
 
     # GROUPS management
     if data.startswith("g:add"):
         await q.answer()
-        await q.edit_message_text("لطفاً لینک گروه (یا @یوزرنیم یا آی‌دی) را ارسال کنید تا اضافه شود.", reply_markup=None)
+        await q.edit_message_text("Please send the group link, @username or id to add.", reply_markup=None)
         context.user_data["awaiting_group"] = True
         return
     if data.startswith("g:del:"):
@@ -351,15 +351,15 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             store["groups"].remove(gid); save_store()
         ids = store.get("groups", [])
         kb = [
-            [InlineKeyboardButton("➕ افزودن گروه جدید", callback_data="g:add")],
-            [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="m:menu")]
+            [InlineKeyboardButton("➕ Add Group", callback_data="g:add")],
+            [InlineKeyboardButton("🔙 Back to Menu", callback_data="m:menu")]
         ] + [
-            [InlineKeyboardButton(f"❌ حذف {gid}", callback_data=f"g:del:{gid}")]
+            [InlineKeyboardButton(f"❌ Remove {gid}", callback_data=f"g:del:{gid}")]
             for gid in ids
         ]
-        await q.answer("گروه حذف شد")
+        await q.answer("Group removed")
         await q.edit_message_text(
-            "👥 گروه‌های ثبت‌شده:\n" + ("\n".join([str(x) for x in ids]) if ids else "ندارد") + "\n\nبرای مدیریت از دکمه‌ها استفاده کنید.",
+            "👥 Added Groups:\n" + ("\n".join([str(x) for x in ids]) if ids else "None") + "\n\nUse buttons below to manage.",
             reply_markup=InlineKeyboardMarkup(kb)
         )
         return
@@ -374,12 +374,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             seconds = parse_interval(interval)
             if seconds < 60:
-                await msg.reply_text("حداقل فاصله 60 ثانیه است.")
+                await msg.reply_text("Minimum interval is 60 seconds.")
             else:
                 store["seconds"] = seconds; save_store(); reschedule_job(context.application)
-                await msg.reply_text(f"فاصله زمانی ذخیره شد: {seconds} ثانیه ⏱️", reply_markup=MAIN_MENU)
+                await msg.reply_text(f"Interval saved: {seconds} seconds ⏱️", reply_markup=MAIN_MENU)
         except Exception as e:
-            await msg.reply_text(f"فرمت اشتباه: {e}")
+            await msg.reply_text(f"Invalid format: {e}")
         context.user_data.clear()
         return
     # MESSAGE input (entities preserved)
@@ -397,7 +397,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         store["message"] = text
         store["entities"] = ents
         save_store()
-        await msg.reply_text("پیام جدید ذخیره شد ✍️", reply_markup=MAIN_MENU)
+        await msg.reply_text("New message saved ✍️", reply_markup=MAIN_MENU)
         context.user_data.clear()
         return
     # PHOTO input
@@ -405,7 +405,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         arg = msg.text.strip()
         store["photo"] = None if arg.lower() == "none" else arg
         save_store()
-        await msg.reply_text("عکس ذخیره شد 🖼️", reply_markup=MAIN_MENU)
+        await msg.reply_text("Photo saved 🖼️", reply_markup=MAIN_MENU)
         context.user_data.clear()
         return
     # BUTTON input
@@ -415,13 +415,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if (not label) or (not (url.startswith("http://") or url.startswith("https://"))):
                 raise Exception()
         except Exception:
-            await msg.reply_text("فرمت اشتباه است. مثال: Shop|https://t.me/YourBot")
+            await msg.reply_text("Bad format. Example: Shop|https://t.me/YourBot")
             return
         if len(store["buttons"]) >= 8:
-            await msg.reply_text("حداکثر 8 دکمه مجاز است.")
+            await msg.reply_text("Maximum 8 buttons allowed.")
             return
         store["buttons"].append([label, url]); save_store()
-        await msg.reply_text("دکمه افزوده شد ➕", reply_markup=MAIN_MENU)
+        await msg.reply_text("Button added ➕", reply_markup=MAIN_MENU)
         context.user_data.clear()
         return
     # GROUP input
@@ -431,11 +431,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ref = _normalize_chat_ref(inp)
             gid = await _resolve_chat_id(context, ref)
         except Exception as e:
-            await msg.reply_text(f"خطا در افزودن گروه: {e}")
+            await msg.reply_text(f"Error adding group: {e}")
             return
         if gid not in store["groups"]:
             store["groups"].append(gid); save_store()
-        await msg.reply_text(f"گروه با موفقیت اضافه شد ✅\nID: {gid}", reply_markup=MAIN_MENU)
+        await msg.reply_text(f"Group added ✅\nID: {gid}", reply_markup=MAIN_MENU)
         context.user_data.clear()
         return
 
