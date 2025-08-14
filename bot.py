@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram Global Poster Bot — Fixed & Hardened
+Telegram Global Poster Bot — Fixed & Hardened (with Premium Emoji + entity capture)
 - python-telegram-bot (v20+)
 - Render-compatible health server (binds $PORT)
 - Async-safe handlers, robust JobQueue scheduling
 - Immutable MessageEntity handling with custom_emoji_id support
-- Simple inline menu to manage: Enable/Disable, Interval, Message, Photo, Buttons, Groups
+- Inline menu to manage: Enable/Disable, Interval, Message, Photo, Buttons, Groups
 - Self-ping keepalive (optional via PUBLIC_URL)
+- NEW: When you set the Message from the menu, the bot now CAPTURES your entities
+       (including premium emojis) automatically from the text you send.
 
 ENV:
   BOT_TOKEN   = ... (required)
@@ -184,6 +186,19 @@ async def _resolve_chat_id(context: ContextTypes.DEFAULT_TYPE, ref: Union[int, s
         return ref
     chat = await context.bot.get_chat(ref)
     return chat.id
+
+
+# --- helpers: serialize entities (keeps custom_emoji_id) ---
+
+def _ent_to_dict(e: MessageEntity) -> dict:
+    return {
+        "type": e.type,
+        "offset": e.offset,
+        "length": e.length,
+        "url": getattr(e, "url", None),
+        "language": getattr(e, "language", None),
+        "custom_emoji_id": getattr(e, "custom_emoji_id", None),
+    }
 
 
 # ---------------- Broadcaster (entities support + throttling) --------------
@@ -396,7 +411,7 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "m:message":
         context.user_data["mode"] = "set_message"
         await safe_edit(
-            "Send the new message text. HTML entities are ignored (use entities JSON for formatting).",
+            "Send the new message text. Any formatting / premium emojis you apply will be captured automatically.",
             reply_markup=back_menu_kb(),
         )
         return
@@ -436,8 +451,8 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (
                 "<b>Help</b>\n\n"
                 "- Use the menu to configure interval/message/photo/buttons/groups.\n"
-                "- Entities: put JSON in settings file under 'entities' or use /entities command.\n"
-                "- Premium emoji: set entity with type='custom_emoji' and custom_emoji_id.\n"
+                "- Entities are captured when you set the Message, or via /entities command.\n"
+                "- Premium emoji: appears as type='custom_emoji' with its custom_emoji_id.\n"
                 "- JobQueue skips mean previous run still executing; increase interval or allow overlap.\n"
             ),
             reply_markup=MAIN_MENU,
@@ -475,9 +490,13 @@ async def owner_dm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if mode == "set_message":
-            store["message"] = msg.text_html or msg.text or ""
+            # Capture plain text + ENTITIES from the message you sent (includes premium emojis)
+            text = msg.text or ""
+            ents = msg.entities or []
+            store["message"] = text
+            store["entities"] = [_ent_to_dict(e) for e in ents]
             save_store()
-            await msg.reply_text("Message updated ✅", reply_markup=MAIN_MENU)
+            await msg.reply_text("Message updated ✅ (text + entities captured)", reply_markup=MAIN_MENU)
             context.user_data.clear()
             return
 
