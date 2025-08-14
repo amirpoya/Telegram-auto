@@ -470,9 +470,9 @@ async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Attached inline buttons to the original post ✅")
     except BadRequest as e:
         await update.message.reply_text(
-        f"Edit failed: {e}
+            f"Edit failed: {e}
 Make sure the bot is an admin of that channel with 'Edit messages' permission, and the post is editable."
-    )
+        )
     except Exception as e:
         await update.message.reply_text(f"Edit failed: {e}")
 
@@ -594,6 +594,8 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "- Premium emojis are preserved (via copy/forward).
 "
                 "- /attach and /detach let you add/remove inline buttons directly on the original channel post.
+"
+                "- Tip: use /mode copy or /mode forward to switch quickly.
 "
             ),
             reply_markup=MAIN_MENU,
