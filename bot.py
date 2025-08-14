@@ -469,11 +469,11 @@ async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_store()
         await update.message.reply_text("Attached inline buttons to the original post ✅")
     except BadRequest as e:
-    await update.message.reply_text(
-        "Edit failed: {}\nMake sure the bot is an admin of that channel with 'Edit messages' permission, and the post is editable.".format(e)
-    )
-except Exception as e:
-    await update.message.reply_text(f"Edit failed: {e}")
+        await update.message.reply_text(
+            "Edit failed: {}\nMake sure the bot is an admin of that channel with 'Edit messages' permission, and the post is editable.".format(e)
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Edit failed: {e}")
 
 
 async def cmd_detach(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -579,7 +579,7 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "m:mode":
         store["use_forward"] = not store.get("use_forward"); save_store()
         await safe_edit(f"Mode switched to <b>{mode_badge()}</b>.", reply_markup=MAIN_MENU, parse_mode="HTML"); return
-        if data == "m:help":
+       if data == "m:help":
         await safe_edit(
             (
                 "<b>Help & tips</b>\n\n"
