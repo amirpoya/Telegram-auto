@@ -130,17 +130,28 @@ async def _resolve_chat_id(context: ContextTypes.DEFAULT_TYPE, ref: Union[int, s
     chat = await context.bot.get_chat(ref)
     return chat.id
 
-# ---------------- Broadcaster (entities support + throttling) --------------
+# ---------------- Broadcaster (entities support + throttling + premium emoji) --------------
 async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
     if not store["enabled"]:
         return
     msg_text = store["message"]
     photo = store.get("photo")
     kb = build_keyboard()
-    ent_objs = [MessageEntity(type=d["type"], offset=d["offset"], length=d["length"],
-                              url=d.get("url"), language=d.get("language"))
-                for d in store.get("entities", [])]
-
+    ent_objs = []
+    # entities: support custom_emoji_id for premium emojis
+    for d in store.get("entities", []):
+        ent = MessageEntity(
+            type=d["type"],
+            offset=d["offset"],
+            length=d["length"],
+            url=d.get("url"),
+            language=d.get("language")
+        )
+        # پشتیبانی از ایموجی پریمیوم
+        if "custom_emoji_id" in d:
+            ent.custom_emoji_id = d["custom_emoji_id"]
+        ent_objs.append(ent)
+    # ارسال پیام به همه گروه‌ها، حتی اگر خطا بدهد
     for gid in list(dict.fromkeys(store["groups"])):
         try:
             if photo:
@@ -154,6 +165,7 @@ async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=kb, entities=ent_objs
                 )
         except RetryAfter as e:
+            print(f"[WARN] Rate limited for group {gid}, waiting {e.retry_after}s")
             await asyncio.sleep(e.retry_after + 1)
             try:
                 if photo:
@@ -168,11 +180,12 @@ async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
                     )
             except Exception as e2:
                 print(f"[WARN] send retry failed for {gid}: {e2}")
-        except (TimedOut, NetworkError):
+        except (TimedOut, NetworkError) as e:
+            print(f"[WARN] Network error for group {gid}: {e}")
             await asyncio.sleep(1)
         except Exception as e:
             print(f"[WARN] send failed for {gid}: {e}")
-        await asyncio.sleep(0.3)  # Increase sleep for reliability (reduce skipped jobs)
+        await asyncio.sleep(0.5)  # کمی بیشتر برای reliability
 
 def reschedule_job(app: Application):
     for j in app.job_queue.get_jobs_by_name("GLOBAL_POSTER"):
@@ -255,7 +268,7 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data == "m:message":
         await safe_edit(
-            "✍️ Please send the new message (Telegram formatting preserved).",
+            "✍️ Please send the new message (Telegram formatting preserved).\nایموجی پریمیوم هم پشتیبانی می‌شود.",
             reply_markup=back_menu_kb()
         )
         context.user_data["awaiting_message"] = True
@@ -302,6 +315,7 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Enable/Disable: Related buttons
 • Remove Group: Remove button beside each group
 • Remove Button: Remove button beside each button
+• ایموجی پریمیوم نیز پشتیبانی می‌شود.
 """,
             reply_markup=back_menu_kb()
         )
@@ -366,7 +380,7 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(txt, reply_markup=InlineKeyboardMarkup(kb))
         return
 
-# ---------------- Interactive text input (bulk group support) ---------------
+# ---------------- Interactive text input (bulk group support + premium emoji) ---------------
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update): return
     msg = update.message
@@ -388,7 +402,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(f"Invalid format: {e}", reply_markup=back_menu_kb())
         context.user_data.clear()
         return
-    # MESSAGE input (entities preserved)
+    # MESSAGE input (entities preserved, including premium emoji)
     if context.user_data.get("awaiting_message"):
         raw = msg.text or ""
         text = raw
@@ -396,14 +410,21 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if msg.entities:
             for e in msg.entities:
                 if e.type == "bot_command": continue
-                d = {"type": e.type, "offset": e.offset, "length": e.length}
+                d = {
+                    "type": e.type,
+                    "offset": e.offset,
+                    "length": e.length
+                }
                 if e.url: d["url"] = e.url
                 if e.language: d["language"] = e.language
+                # پشتیبانی ایموجی پریمیوم
+                if hasattr(e, "custom_emoji_id") and e.custom_emoji_id:
+                    d["custom_emoji_id"] = e.custom_emoji_id
                 ents.append(d)
         store["message"] = text
         store["entities"] = ents
         save_store()
-        await msg.reply_text("New message saved ✍️", reply_markup=MAIN_MENU)
+        await msg.reply_text("New message saved ✍️\nایموجی پریمیوم نیز پشتیبانی می‌شود.", reply_markup=MAIN_MENU)
         context.user_data.clear()
         return
     # PHOTO input
