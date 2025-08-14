@@ -561,7 +561,9 @@ async def owner_dm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if mode == "set_groups":
             lines = (msg.text or "").splitlines(); added, removed, errors = [], [], []
             for line in lines:
-                line = line.strip(); if not line: continue
+                line = line.strip()
+                if not line: 
+                  continue
                 try:
                     removing = line.startswith("-")
                     ref = _normalize_chat_ref(line[1:] if removing else line)
