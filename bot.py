@@ -469,10 +469,9 @@ async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_store()
         await update.message.reply_text("Attached inline buttons to the original post ✅")
     except BadRequest as e:
-        await update.message.reply_text(
-            f"Edit failed: {e}
-Make sure the bot is an admin of that channel with 'Edit messages' permission, and the post is editable."
-        )
+       await update.message.reply_text(
+    f"Edit failed: {e}\nMake sure the bot is an admin of that channel with 'Edit messages' permission, and the post is editable."
+)
     except Exception as e:
         await update.message.reply_text(f"Edit failed: {e}")
 
