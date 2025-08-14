@@ -469,12 +469,12 @@ async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_store()
         await update.message.reply_text("Attached inline buttons to the original post ✅")
     except BadRequest as e:
-        await update.message.reply_text(
-            "Edit failed: {}
-Make sure the bot is an admin of that channel with 'Edit messages' permission, and the post is editable.".format(e)
-        )
-    except Exception as e:
-        await update.message.reply_text(f"Edit failed: {e}")
+    await update.message.reply_text(
+        "Edit failed: {}\nMake sure the bot is an admin of that channel with 'Edit messages' permission, and the post is editable.".format(e)
+    )
+except Exception as e:
+    await update.message.reply_text(f"Edit failed: {e}")
+
 
 async def cmd_detach(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Remove inline buttons from the ORIGINAL template post."""
