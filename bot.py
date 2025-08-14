@@ -469,8 +469,10 @@ async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_store()
         await update.message.reply_text("Attached inline buttons to the original post ✅")
     except BadRequest as e:
-        await update.message.reply_text("Edit failed: {}
-Make sure the bot is an admin of that channel with 'Edit messages' permission, and the post is editable.".format(e))
+        await update.message.reply_text(
+            "Edit failed: {}
+Make sure the bot is an admin of that channel with 'Edit messages' permission, and the post is editable.".format(e)
+        )
     except Exception as e:
         await update.message.reply_text(f"Edit failed: {e}")
 
@@ -580,7 +582,7 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "m:help":
         await safe_edit(
             (
-                "<b>Help & tips</b>
+                "<b>Help & Tips</b>
 
 "
                 "- /import: Reply to your template to capture it.
