@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram Global Poster Bot — COPY/FORWARD + Inline Buttons (Premium Emoji-safe)
+Telegram Global Poster Bot — COPY/FORWARD + Inline Buttons + Channel Edit (/attach) (Premium Emoji-safe)
 
 ✅ What this file does
-- Works on python-telegram-bot v20+
+- Works on python-telegram-bot v21+
 - Render-ready health server (binds $PORT)
 - Async handlers everywhere
 - Stores settings in global_settings.json
 - Supports premium emoji via MessageEntity(custom_emoji)
 - Modes:
   • COPY   → copyMessage (clean, no "Forwarded from", supports buttons attached)
-  • FORWARD→ forwardMessage (shows "Forwarded from", buttons are sent as a 2nd reply message just under it)
+  • FORWARD→ forwardMessage (shows "Forwarded from", buttons are sent as a 2nd invisible-text message just under it)
 - /import    → Reply to a message to capture it as the template (chat_id, message_id) + text/entities/photo
 - /preview   → Preview current template or (text/entities) fallback in your DM
-- /forward   → Reply to a message and forward it to all groups; then post buttons as a reply under it
+- /forward   → Reply to a message and forward it to all groups; then post buttons as a reply under it (hidden quote)
+- /attach    → Edit the ORIGINAL channel post (template) and attach inline buttons to it (bot must be channel admin)
+- /detach    → Remove inline buttons from the ORIGINAL channel post
 - Flexible Buttons Input in menu (no JSON needed):
      Open - https://a.com
      Contact - @YourUser
@@ -33,13 +35,14 @@ import os, re, json, asyncio, threading, http.server, socketserver
 from typing import List, Dict, Any, Union
 from urllib.parse import urlparse
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, ReplyParameters, InlineQueryResultArticle, InputTextMessageContent
 from telegram.error import RetryAfter, TimedOut, NetworkError, BadRequest
 from telegram.ext import (
     Application, CommandHandler, ContextTypes, MessageHandler,
     CallbackQueryHandler, InlineQueryHandler, filters
 )
 import aiohttp
+import uuid
 
 # ---------------- Health server (Render) ----------------
 
@@ -90,10 +93,11 @@ DEFAULTS: Dict[str, Any] = {
     "seconds": 15 * 60,
     "enabled": False,
     "groups": [],            # list[int]
-    "buttons": [],           # list[[label, url]] or list[[[label,url], [label,url]], ...] rows
+    "buttons": [],           # list[[label, url]] or list[[[label,url],[label,url]], ...] rows
     "photo": None,           # file_id or url
     "entities": [],          # list[dict]
     "template": None,        # {"chat_id": int, "message_id": int}
+    "template_has_keyboard": False,  # true if original message already includes inline keyboard
     "use_forward": False     # False=COPY, True=FORWARD
 }
 
@@ -118,6 +122,8 @@ def load_store() -> Dict[str, Any]:
         data["template"] = None
     if not isinstance(data.get("use_forward"), bool):
         data["use_forward"] = False
+    if not isinstance(data.get("template_has_keyboard"), bool):
+        data["template_has_keyboard"] = False
     return data
 
 store: Dict[str, Any] = load_store()
@@ -195,7 +201,10 @@ def parse_buttons_flexible(raw: str):
     rows = []
     for line in raw.splitlines():
         line = line.strip()
-        if not line or line.startswith('#'): continue
+        if not line:
+            continue
+        if line.startswith('#'):
+            continue
         parts = [p.strip() for p in line.split('|')] if '|' in line else [line]
         row = []
         for part in parts:
@@ -258,6 +267,8 @@ def build_keyboard() -> InlineKeyboardMarkup | None:
 
 # ---------------- Broadcaster ----------------
 
+INVISIBLE = "\u2060"  # zero-width no-break space (sticks tight, no preview)
+
 async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
     if not store.get("enabled"):
         return
@@ -270,26 +281,25 @@ async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
         for gid in list(dict.fromkeys(store.get("groups", []))):
             try:
                 if store.get("use_forward"):
-                    # 1) Forward the template message (keeps 'Forwarded from' and full structure)
                     fwd = await context.bot.forward_message(
                         chat_id=gid, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"]
                     )
-                    # 2) Glue-like buttons: send an invisible-text reply directly under the forwarded msg
+                    # If original template already had its own keyboard, don't add ours
                     if kb:
                         try:
-                            # use ZERO WIDTH NO-BREAK SPACE to avoid selectable text bubble
-                            invisible = "⁠"  # ⁣ also works; ⁠ sticks tighter on some clients
                             await context.bot.send_message(
                                 chat_id=gid,
-                                text=invisible,
+                                text=INVISIBLE,
                                 reply_markup=kb,
-                                reply_to_message_id=fwd.message_id,
-                                allow_sending_without_reply=True,
+                                reply_parameters=ReplyParameters(
+                                    message_id=fwd.message_id,
+                                    allow_sending_without_reply=True,
+                                    quote=False,
+                                ),
                             )
                         except Exception as e2:
                             print(f"[WARN] buttons failed for {gid}: {e2}")
                 else:
-                    # CopyMessage can attach buttons directly
                     await context.bot.copy_message(
                         chat_id=gid,
                         from_chat_id=tpl["chat_id"],
@@ -305,73 +315,15 @@ async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
                         )
                         if kb:
                             try:
-                                invisible = "⁠"
                                 await context.bot.send_message(
                                     chat_id=gid,
-                                    text=invisible,
+                                    text=INVISIBLE,
                                     reply_markup=kb,
-                                    reply_to_message_id=fwd.message_id,
-                                    allow_sending_without_reply=True,
-                                )
-                            except Exception as e2:
-                                print(f"[WARN] buttons failed (retry) for {gid}: {e2}")
-                    else:
-                        await context.bot.copy_message(
-                            chat_id=gid, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"], reply_markup=kb
-                        )
-                except Exception as e2:
-                    print(f"[WARN] retry failed for {gid}: {e2}")
-            except (TimedOut, NetworkError) as e:
-                print(f"[WARN] Network error for group {gid}: {e}")
-                await asyncio.sleep(1)
-            except Exception as e:
-                print(f"[WARN] send failed for {gid}: {e}")
-            await asyncio.sleep(0.5)
-        return
-
-    kb = build_keyboard()
-    tpl = store.get("template") if isinstance(store.get("template"), dict) else None
-
-    # Preferred: use saved template
-    if tpl and tpl.get("chat_id") and tpl.get("message_id"):
-        for gid in list(dict.fromkeys(store.get("groups", []))):
-            try:
-                if store.get("use_forward"):
-                    fwd = await context.bot.forward_message(
-                        chat_id=gid, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"]
-                    )
-                    # Buttons under the forwarded message (as a reply)
-                    if kb:
-                        try:
-                            await context.bot.send_message(
-                                chat_id=gid,
-                                text="\u2063",
-                                reply_markup=kb,
-                                reply_to_message_id=fwd.message_id,
-                                allow_sending_without_reply=True,
-                            )
-                        except Exception as e2:
-                            print(f"[WARN] buttons failed for {gid}: {e2}")
-                else:
-                    # CopyMessage can attach buttons directly
-                    await context.bot.copy_message(
-                        chat_id=gid,
-                        from_chat_id=tpl["chat_id"],
-                        message_id=tpl["message_id"],
-                        reply_markup=kb,
-                    )
-            except RetryAfter as e:
-                await asyncio.sleep(int(e.retry_after) + 1)
-                try:
-                    if store.get("use_forward"):
-                        fwd = await context.bot.forward_message(
-                            chat_id=gid, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"]
-                        )
-                        if kb:
-                            try:
-                                await context.bot.send_message(
-                                    chat_id=gid, text="\u2063", reply_markup=kb,
-                                    reply_to_message_id=fwd.message_id, allow_sending_without_reply=True,
+                                    reply_parameters=ReplyParameters(
+                                        message_id=fwd.message_id,
+                                        allow_sending_without_reply=True,
+                                        quote=False,
+                                    ),
                                 )
                             except Exception as e2:
                                 print(f"[WARN] buttons failed (retry) for {gid}: {e2}")
@@ -482,16 +434,65 @@ def status_text() -> str:
     mins = store.get("seconds", 0) // 60
     tpl = store.get("template")
     tpl_txt = f"{tpl.get('chat_id')}:{tpl.get('message_id')}" if isinstance(tpl, dict) else "None"
+    kb_flag = "Yes" if store.get("template_has_keyboard") else "No"
     return (
         f"✨ <b>Status:</b> {'Enabled ✅' if store.get('enabled') else 'Disabled ⏹️'}\n"
         f"⏰ Interval: <code>{store.get('seconds')}</code> sec (~{mins} min)\n"
         f"🔁 Mode: <b>{mode_badge()}</b>\n"
         f"🧩 Template: <code>{tpl_txt}</code>\n"
+        f"🧷 Template has its own buttons: <b>{kb_flag}</b>\n"
         f"🖼️ Photo: <code>{store.get('photo') or 'None'}</code>\n"
         f"✍️ Message:\n<code>{(store.get('message') or '').replace('<','&lt;').replace('>','&gt;')}</code>\n"
         f"\n🔘 Buttons:\n{pretty_buttons()}\n"
         f"\n👥 Groups count: <b>{len(store.get('groups', []))}</b>"
     )
+
+# ---------------- Commands ----------------
+
+async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Attach inline buttons to the ORIGINAL template post (e.g., in a channel).
+    Requirements: Bot must be admin of that channel with 'Edit messages' permission.
+    """
+    if not is_owner(update):
+        return
+    tpl = store.get("template")
+    if not (isinstance(tpl, dict) and tpl.get("chat_id") and tpl.get("message_id")):
+        await update.message.reply_text("No template set. Use /import by replying to the target post (or forward it here) first.")
+        return
+    kb = build_keyboard()
+    if not kb:
+        await update.message.reply_text("No buttons set. Go to 🔘 Buttons in menu and define them first.")
+        return
+    try:
+        await context.bot.edit_message_reply_markup(chat_id=tpl["chat_id"], message_id=tpl["message_id"], reply_markup=kb)
+        store["template_has_keyboard"] = True
+        save_store()
+        await update.message.reply_text("Attached inline buttons to the original post ✅")
+    except BadRequest as e:
+        await update.message.reply_text(
+        f"Edit failed: {e}
+Make sure the bot is an admin of that channel with 'Edit messages' permission, and the post is editable."
+    )
+    except Exception as e:
+        await update.message.reply_text(f"Edit failed: {e}")
+
+async def cmd_detach(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove inline buttons from the ORIGINAL template post."""
+    if not is_owner(update):
+        return
+    tpl = store.get("template")
+    if not (isinstance(tpl, dict) and tpl.get("chat_id") and tpl.get("message_id")):
+        await update.message.reply_text("No template set. Use /import first.")
+        return
+    try:
+        await context.bot.edit_message_reply_markup(chat_id=tpl["chat_id"], message_id=tpl["message_id"], reply_markup=None)
+        store["template_has_keyboard"] = False
+        save_store()
+        await update.message.reply_text("Removed inline buttons from the original post ✅")
+    except BadRequest as e:
+        await update.message.reply_text(f"Remove failed: {e}")
+    except Exception as e:
+        await update.message.reply_text(f"Remove failed: {e}")
 
 # ---------------- Commands ----------------
 
@@ -505,8 +506,6 @@ async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Mode set to: {'Forward' if store['use_forward'] else 'Copy'} ✅")
     else:
         await update.message.reply_text("Usage: /mode copy  or  /mode forward")
-
-# ---------------- Commands ----------------
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -583,12 +582,22 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "m:help":
         await safe_edit(
             (
-                "<b>Help</b>\n\n"
-                "- /import: Reply to your template to capture it.\n"
-                "- /forward: Reply to a message → forward to all groups, then send buttons under it.\n"
-                "- Copy mode supports buttons attached; Forward mode uses a reply-with-buttons.\n"
-                "- Premium emojis are preserved (via copy/forward).\n"
-            ), reply_markup=MAIN_MENU, parse_mode="HTML",
+                "<b>Help</b>
+
+"
+                "- /import: Reply to your template to capture it.
+"
+                "- /forward: Reply to a message → forward to all groups, then send buttons under it.
+"
+                "- Copy mode supports buttons attached; Forward mode uses a reply-with-buttons.
+"
+                "- Premium emojis are preserved (via copy/forward).
+"
+                "- /attach and /detach let you add/remove inline buttons directly on the original channel post.
+"
+            ),
+            reply_markup=MAIN_MENU,
+            parse_mode="HTML",
         ); return
     if data == "m:menu":
         await safe_edit("🌟 Bot Management Menu:", reply_markup=MAIN_MENU); return
@@ -643,7 +652,7 @@ async def owner_dm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for line in lines:
                 line = line.strip()
                 if not line:
-                  continue
+                    continue
                 try:
                     removing = line.startswith("-")
                     ref = _normalize_chat_ref(line[1:] if removing else line)
@@ -669,13 +678,51 @@ async def cmd_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
     src = update.message.reply_to_message
     if not src:
         await update.message.reply_text("Reply /import to the target message (with premium emoji)"); return
-    text = src.text or src.caption or ""; ents = src.entities or src.caption_entities or []
-    store["template"] = {"chat_id": src.chat_id, "message_id": src.message_id}
+
+    # Try to capture original origin (supports 'forwarded from channel')
+    orig_chat_id = None
+    orig_msg_id = None
+
+    fo = getattr(src, "forward_origin", None)
+    if fo is not None:
+        try:
+            ch = getattr(fo, "chat", None)
+            mid = getattr(fo, "message_id", None)
+            if ch and getattr(ch, "id", None) and mid:
+                orig_chat_id = ch.id
+                orig_msg_id = mid
+        except Exception:
+            pass
+
+    # Legacy fields for safety
+    if (orig_chat_id is None or orig_msg_id is None) and hasattr(src, "forward_from_chat") and hasattr(src, "forward_from_message_id"):
+        try:
+            if src.forward_from_chat and src.forward_from_message_id:
+                orig_chat_id = src.forward_from_chat.id
+                orig_msg_id = src.forward_from_message_id
+        except Exception:
+            pass
+
+    # Fallback: use the very message we replied to
+    if orig_chat_id is None or orig_msg_id is None:
+        orig_chat_id = src.chat_id
+        orig_msg_id = src.message_id
+
+    # Detect if the captured message already has inline keyboard
+    has_kb = bool(getattr(src, "reply_markup", None) and getattr(src.reply_markup, "inline_keyboard", None))
+
+    text = src.text or src.caption or ""
+    ents = src.entities or src.caption_entities or []
+
+    store["template"] = {"chat_id": orig_chat_id, "message_id": orig_msg_id}
+    store["template_has_keyboard"] = bool(has_kb)
     store["message"] = text
     store["entities"] = [_ent_to_dict(e) for e in ents]
-    if src.photo: store["photo"] = src.photo[-1].file_id
+    if src.photo:
+        store["photo"] = src.photo[-1].file_id
     save_store(); reschedule_job(context.application)
-    await update.message.reply_text("Imported ✅ (template + message/entities + photo if any)")
+    kb_note = " (with inline buttons)" if has_kb else ""
+    await update.message.reply_text(f"Imported ✅ template{kb_note}.")
 
 async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update): return
@@ -684,7 +731,12 @@ async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if store.get("use_forward"):
             fwd = await context.bot.forward_message(chat_id=update.effective_chat.id, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"])
             if kb:
-                await context.bot.send_message(chat_id=update.effective_chat.id, text="\u2063", reply_markup=kb, reply_to_message_id=fwd.message_id, allow_sending_without_reply=True)
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=INVISIBLE,
+                    reply_markup=kb,
+                    reply_parameters=ReplyParameters(message_id=fwd.message_id, allow_sending_without_reply=True, quote=False),
+                )
         else:
             await context.bot.copy_message(chat_id=update.effective_chat.id, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"], reply_markup=kb)
         return
@@ -707,7 +759,12 @@ async def cmd_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
             forwarded_count += 1
             if kb:
                 try:
-                    await context.bot.send_message(chat_id=gid, text="\u2063", reply_markup=kb, reply_to_message_id=fwd_msg.message_id, allow_sending_without_reply=True)
+                    await context.bot.send_message(
+                        chat_id=gid,
+                        text=INVISIBLE,
+                        reply_markup=kb,
+                        reply_parameters=ReplyParameters(message_id=fwd_msg.message_id, allow_sending_without_reply=True, quote=False),
+                    )
                 except Exception as e2:
                     print(f"[WARN] buttons failed for {gid}: {e2}")
         except RetryAfter as e:
@@ -717,7 +774,12 @@ async def cmd_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 forwarded_count += 1
                 if kb:
                     try:
-                        await context.bot.send_message(chat_id=gid, text="\u2063", reply_markup=kb, reply_to_message_id=fwd_msg.message_id, allow_sending_without_reply=True)
+                        await context.bot.send_message(
+                            chat_id=gid,
+                            text=INVISIBLE,
+                            reply_markup=kb,
+                            reply_parameters=ReplyParameters(message_id=fwd_msg.message_id, allow_sending_without_reply=True, quote=False),
+                        )
                     except Exception as e2:
                         print(f"[WARN] buttons failed after retry for {gid}: {e2}")
             except Exception as e2:
@@ -763,12 +825,55 @@ async def entities_followup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.effective_message.reply_text(f"Parse error: {e}")
 
+# ---------------- Inline Mode ----------------
+async def on_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Returns inline results that post the stored template (preserves premium emoji/entities)
+    try:
+        q = (update.inline_query.query or "").strip()
+    except Exception:
+        return
+    kb = build_keyboard()
+    text = store.get("message", "") or " "
+    ent_objs = await _build_entities_from_store()
+
+    results = [
+        InlineQueryResultArticle(
+            id=str(uuid.uuid4()),
+            title="Send template with buttons",
+            input_message_content=InputTextMessageContent(
+                message_text=text,
+                entities=ent_objs if ent_objs else None,
+            ),
+            reply_markup=kb,
+            description="Imported text + premium emoji + your buttons",
+        )
+    ]
+    if q:
+        results.append(
+            InlineQueryResultArticle(
+                id=str(uuid.uuid4()),
+                title="Send typed text (quick)",
+                input_message_content=InputTextMessageContent(message_text=q),
+                reply_markup=kb,
+                description="Use what you typed with same buttons",
+            )
+        )
+    try:
+        await update.inline_query.answer(results, cache_time=0, is_personal=True)
+    except Exception as e:
+        print(f"[WARN] inline answer failed: {e}")
+
 # ---------------- Errors ----------------
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     print("[ERROR]", repr(context.error))
 
 # ---------------- Main ----------------
 async def on_startup(app: Application):
+    # Ensure polling mode is clean
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        pass
     app.job_queue.run_repeating(_keepalive, interval=300, first=10, name="KEEPALIVE")
     reschedule_job(app)
 
@@ -781,9 +886,13 @@ def main():
     app.add_handler(CommandHandler("import", cmd_import))
     app.add_handler(CommandHandler("preview", cmd_preview))
     app.add_handler(CommandHandler("forward", cmd_forward))
+    app.add_handler(CommandHandler("attach", cmd_attach))
+    app.add_handler(CommandHandler("detach", cmd_detach))
     app.add_handler(CommandHandler("mode", cmd_mode))
     # Menu callbacks
     app.add_handler(CallbackQueryHandler(on_menu_cb, pattern=r"^m:"))
+    # Inline mode
+    app.add_handler(InlineQueryHandler(on_inline))
     # Owner DM inputs
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.ALL, owner_dm_handler), group=1)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, entities_followup), group=0)
