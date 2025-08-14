@@ -579,7 +579,7 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "m:mode":
         store["use_forward"] = not store.get("use_forward"); save_store()
         await safe_edit(f"Mode switched to <b>{mode_badge()}</b>.", reply_markup=MAIN_MENU, parse_mode="HTML"); return
-       if data == "m:help":
+    if data == "m:help":
         await safe_edit(
             (
                 "<b>Help & tips</b>\n\n"
