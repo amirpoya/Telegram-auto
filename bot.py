@@ -270,6 +270,73 @@ async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
         for gid in list(dict.fromkeys(store.get("groups", []))):
             try:
                 if store.get("use_forward"):
+                    # 1) Forward the template message (keeps 'Forwarded from' and full structure)
+                    fwd = await context.bot.forward_message(
+                        chat_id=gid, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"]
+                    )
+                    # 2) Glue-like buttons: send an invisible-text reply directly under the forwarded msg
+                    if kb:
+                        try:
+                            # use ZERO WIDTH NO-BREAK SPACE to avoid selectable text bubble
+                            invisible = "⁠"  # ⁣ also works; ⁠ sticks tighter on some clients
+                            await context.bot.send_message(
+                                chat_id=gid,
+                                text=invisible,
+                                reply_markup=kb,
+                                reply_to_message_id=fwd.message_id,
+                                allow_sending_without_reply=True,
+                            )
+                        except Exception as e2:
+                            print(f"[WARN] buttons failed for {gid}: {e2}")
+                else:
+                    # CopyMessage can attach buttons directly
+                    await context.bot.copy_message(
+                        chat_id=gid,
+                        from_chat_id=tpl["chat_id"],
+                        message_id=tpl["message_id"],
+                        reply_markup=kb,
+                    )
+            except RetryAfter as e:
+                await asyncio.sleep(int(e.retry_after) + 1)
+                try:
+                    if store.get("use_forward"):
+                        fwd = await context.bot.forward_message(
+                            chat_id=gid, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"]
+                        )
+                        if kb:
+                            try:
+                                invisible = "⁠"
+                                await context.bot.send_message(
+                                    chat_id=gid,
+                                    text=invisible,
+                                    reply_markup=kb,
+                                    reply_to_message_id=fwd.message_id,
+                                    allow_sending_without_reply=True,
+                                )
+                            except Exception as e2:
+                                print(f"[WARN] buttons failed (retry) for {gid}: {e2}")
+                    else:
+                        await context.bot.copy_message(
+                            chat_id=gid, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"], reply_markup=kb
+                        )
+                except Exception as e2:
+                    print(f"[WARN] retry failed for {gid}: {e2}")
+            except (TimedOut, NetworkError) as e:
+                print(f"[WARN] Network error for group {gid}: {e}")
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"[WARN] send failed for {gid}: {e}")
+            await asyncio.sleep(0.5)
+        return
+
+    kb = build_keyboard()
+    tpl = store.get("template") if isinstance(store.get("template"), dict) else None
+
+    # Preferred: use saved template
+    if tpl and tpl.get("chat_id") and tpl.get("message_id"):
+        for gid in list(dict.fromkeys(store.get("groups", []))):
+            try:
+                if store.get("use_forward"):
                     fwd = await context.bot.forward_message(
                         chat_id=gid, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"]
                     )
@@ -428,6 +495,19 @@ def status_text() -> str:
 
 # ---------------- Commands ----------------
 
+async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update):
+        return
+    arg = (context.args[0].lower() if context.args else "").strip()
+    if arg in {"copy", "forward"}:
+        store["use_forward"] = (arg == "forward")
+        save_store()
+        await update.message.reply_text(f"Mode set to: {'Forward' if store['use_forward'] else 'Copy'} ✅")
+    else:
+        await update.message.reply_text("Usage: /mode copy  or  /mode forward")
+
+# ---------------- Commands ----------------
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -561,9 +641,7 @@ async def owner_dm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if mode == "set_groups":
             lines = (msg.text or "").splitlines(); added, removed, errors = [], [], []
             for line in lines:
-                line = line.strip()
-                if not line: 
-                  continue
+                line = line.strip(); if not line: continue
                 try:
                     removing = line.startswith("-")
                     ref = _normalize_chat_ref(line[1:] if removing else line)
@@ -701,6 +779,7 @@ def main():
     app.add_handler(CommandHandler("import", cmd_import))
     app.add_handler(CommandHandler("preview", cmd_preview))
     app.add_handler(CommandHandler("forward", cmd_forward))
+    app.add_handler(CommandHandler("mode", cmd_mode))
     # Menu callbacks
     app.add_handler(CallbackQueryHandler(on_menu_cb, pattern=r"^m:"))
     # Owner DM inputs
