@@ -469,9 +469,10 @@ async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_store()
         await update.message.reply_text("Attached inline buttons to the original post ✅")
     except BadRequest as e:
-       await update.message.reply_text(
-    f"Edit failed: {e}\nMake sure the bot is an admin of that channel with 'Edit messages' permission, and the post is editable."
-)
+        await update.message.reply_text(
+        f"Edit failed: {e}
+Make sure the bot is an admin of that channel with 'Edit messages' permission, and the post is editable."
+    )
     except Exception as e:
         await update.message.reply_text(f"Edit failed: {e}")
 
@@ -581,7 +582,7 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "m:help":
         await safe_edit(
             (
-                "<b>Help</b>
+                "<b>Help & tips</b>
 
 "
                 "- /import: Reply to your template to capture it.
@@ -599,7 +600,7 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
             reply_markup=MAIN_MENU,
             parse_mode="HTML",
-        ); return
+        ); return 
     if data == "m:menu":
         await safe_edit("🌟 Bot Management Menu:", reply_markup=MAIN_MENU); return
 
