@@ -1,4 +1,24 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Telegram Global Poster Bot — Fixed & Hardened
+- python-telegram-bot (v20+)
+- Render-compatible health server (binds $PORT)
+- Async-safe handlers, robust JobQueue scheduling
+- Immutable MessageEntity handling with custom_emoji_id support
+- Simple inline menu to manage: Enable/Disable, Interval, Message, Photo, Buttons, Groups
+- Self-ping keepalive (optional via PUBLIC_URL)
+
+ENV:
+  BOT_TOKEN   = ... (required)
+  OWNER_IDS   = 123,456 (comma separated user IDs; required)
+  PUBLIC_URL  = https://telegram-auto.onrender.com (optional for keepalive)
+
+FILES:
+  global_settings.json  (auto-created)
+"""
+
+from __future__ import annotations
 import os, re, json, asyncio, threading, http.server, socketserver
 from typing import List, Tuple, Dict, Any, Union
 from urllib.parse import urlparse
@@ -9,25 +29,35 @@ from telegram import (
 from telegram.error import RetryAfter, TimedOut, NetworkError, BadRequest
 from telegram.ext import (
     Application, CommandHandler, ContextTypes, MessageHandler,
-    ChatMemberHandler, CallbackQueryHandler, filters, JobQueue
+    CallbackQueryHandler, filters, JobQueue
 )
 import aiohttp
 
 # ---------------- Health server (Render needs an open port) ----------------
+
 def start_health_server():
-    port = int(os.environ["PORT"])
+    port = int(os.environ.get("PORT", "10000"))
     print("Health server binding on PORT =", port, flush=True)
+
     class Handler(http.server.SimpleHTTPRequestHandler):
         def do_GET(self):
-            self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
-        def log_message(self, *a, **k): return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *a, **k):
+            return
+
     def serve():
         with socketserver.TCPServer(("", port), Handler) as httpd:
             httpd.allow_reuse_address = True
             httpd.serve_forever()
+
     threading.Thread(target=serve, daemon=True).start()
 
+
 # ---------------- Self-ping (prevent Render inactivity sleep) --------------
+
 async def _keepalive(context: ContextTypes.DEFAULT_TYPE):
     url = os.getenv("PUBLIC_URL", "").strip()
     if not url:
@@ -40,23 +70,28 @@ async def _keepalive(context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
+
 # ---------------- Credentials ----------------------------------------------
+
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OWNER_IDS = {int(x) for x in os.getenv("OWNER_IDS", "").strip().split(",") if x.strip().isdigit()}
 if not TOKEN or not OWNER_IDS:
     raise SystemExit("BOT_TOKEN and OWNER_IDS env vars are required. Example OWNER_IDS='123,456'")
 
+
 # ---------------- Storage ---------------------------------------------------
+
 DATA_FILE = "global_settings.json"
-DEFAULTS = {
+DEFAULTS: Dict[str, Any] = {
     "message": "Hello! Scheduled message 🌟",
     "seconds": 15 * 60,
     "enabled": False,
-    "groups": [],
-    "buttons": [],
-    "photo": None,
-    "entities": []
+    "groups": [],           # list[int]
+    "buttons": [],          # list[[label, url]]
+    "photo": None,          # file_id or url
+    "entities": []          # list[dict]
 }
+
 
 def load_store() -> Dict[str, Any]:
     if os.path.exists(DATA_FILE):
@@ -69,35 +104,54 @@ def load_store() -> Dict[str, Any]:
         data = {}
     for k, v in DEFAULTS.items():
         data.setdefault(k, v)
-    if not isinstance(data.get("groups"), list): data["groups"] = []
-    if not isinstance(data.get("buttons"), list): data["buttons"] = []
-    if not isinstance(data.get("entities"), list): data["entities"] = []
+    if not isinstance(data.get("groups"), list):
+        data["groups"] = []
+    if not isinstance(data.get("buttons"), list):
+        data["buttons"] = []
+    if not isinstance(data.get("entities"), list):
+        data["entities"] = []
     return data
+
 
 store: Dict[str, Any] = load_store()
 
-def save_store():
+
+def save_store() -> None:
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(store, f, ensure_ascii=False, indent=2)
 
+
 # ---------------- Helpers ---------------------------------------------------
+
 def is_owner(update: Update) -> bool:
-    return (update.effective_chat and update.effective_chat.type == "private" and
-            update.effective_user and update.effective_user.id in OWNER_IDS)
+    return (
+        update.effective_chat
+        and update.effective_chat.type == "private"
+        and update.effective_user
+        and update.effective_user.id in OWNER_IDS
+    )
+
 
 def parse_interval(s: str) -> int:
     s = s.strip().lower()
-    if s.endswith("m"): return int(float(s[:-1]) * 60)
-    if s.endswith("h"): return int(float(s[:-1]) * 3600)
-    if s.endswith("d"): return int(float(s[:-1]) * 86400)
-    if re.fullmatch(r"\d+", s): return int(s)
+    if s.endswith("m"):
+        return int(float(s[:-1]) * 60)
+    if s.endswith("h"):
+        return int(float(s[:-1]) * 3600)
+    if s.endswith("d"):
+        return int(float(s[:-1]) * 86400)
+    if re.fullmatch(r"\d+", s):
+        return int(s)
     raise ValueError("Invalid interval. Example: 15m or 2h or 1d or raw seconds")
+
 
 def build_keyboard() -> InlineKeyboardMarkup | None:
     btns: List[List[str]] = store.get("buttons", [])
-    if not btns: return None
+    if not btns:
+        return None
     rows = [[InlineKeyboardButton(text=label, url=url)] for label, url in btns]
     return InlineKeyboardMarkup(rows)
+
 
 def _normalize_chat_ref(ref: str) -> Union[int, str]:
     ref = ref.strip()
@@ -124,389 +178,465 @@ def _normalize_chat_ref(ref: str) -> Union[int, str]:
         return "@" + parts[0]
     return "@" + ref
 
+
 async def _resolve_chat_id(context: ContextTypes.DEFAULT_TYPE, ref: Union[int, str]) -> int:
     if isinstance(ref, int):
         return ref
     chat = await context.bot.get_chat(ref)
     return chat.id
 
-# ---------------- Broadcaster (entities support + throttling + premium emoji) --------------
+
+# ---------------- Broadcaster (entities support + throttling) --------------
+
+async def _build_entities_from_store() -> List[MessageEntity]:
+    ent_objs: List[MessageEntity] = []
+    for d in store.get("entities", []):
+        # MessageEntity in PTB v20+ is immutable; pass all fields in constructor
+        ent = MessageEntity(
+            type=d.get("type"),
+            offset=d.get("offset", 0),
+            length=d.get("length", 0),
+            url=d.get("url"),
+            language=d.get("language"),
+            custom_emoji_id=d.get("custom_emoji_id"),  # only valid for type=="custom_emoji"
+            user=None,
+        )
+        ent_objs.append(ent)
+    return ent_objs
+
+
 async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
-    if not store["enabled"]:
+    if not store.get("enabled"):
         return
-    msg_text = store["message"]
+
+    msg_text: str = store.get("message", "")
     photo = store.get("photo")
     kb = build_keyboard()
-    ent_objs = []
-    # entities: support custom_emoji_id for premium emojis
-    for d in store.get("entities", []):
-        ent = MessageEntity(
-            type=d["type"],
-            offset=d["offset"],
-            length=d["length"],
-            url=d.get("url"),
-            language=d.get("language")
-        )
-        # پشتیبانی از ایموجی پریمیوم
-        if "custom_emoji_id" in d:
-            ent.custom_emoji_id = d["custom_emoji_id"]
-        ent_objs.append(ent)
-    # ارسال پیام به همه گروه‌ها، حتی اگر خطا بدهد
-    for gid in list(dict.fromkeys(store["groups"])):
+    ent_objs = await _build_entities_from_store()
+
+    # iterate unique group ids (order preserved)
+    for gid in list(dict.fromkeys(store.get("groups", []))):
         try:
             if photo:
                 await context.bot.send_photo(
-                    chat_id=gid, photo=photo, caption=msg_text,
-                    reply_markup=kb, caption_entities=ent_objs
+                    chat_id=gid,
+                    photo=photo,
+                    caption=msg_text,
+                    reply_markup=kb,
+                    caption_entities=ent_objs if ent_objs else None,
                 )
             else:
                 await context.bot.send_message(
-                    chat_id=gid, text=msg_text,
-                    reply_markup=kb, entities=ent_objs
+                    chat_id=gid,
+                    text=msg_text,
+                    reply_markup=kb,
+                    entities=ent_objs if ent_objs else None,
                 )
         except RetryAfter as e:
             print(f"[WARN] Rate limited for group {gid}, waiting {e.retry_after}s")
-            await asyncio.sleep(e.retry_after + 1)
+            await asyncio.sleep(int(e.retry_after) + 1)
             try:
                 if photo:
                     await context.bot.send_photo(
-                        chat_id=gid, photo=photo, caption=msg_text,
-                        reply_markup=kb, caption_entities=ent_objs
+                        chat_id=gid,
+                        photo=photo,
+                        caption=msg_text,
+                        reply_markup=kb,
+                        caption_entities=ent_objs if ent_objs else None,
                     )
                 else:
                     await context.bot.send_message(
-                        chat_id=gid, text=msg_text,
-                        reply_markup=kb, entities=ent_objs
+                        chat_id=gid,
+                        text=msg_text,
+                        reply_markup=kb,
+                        entities=ent_objs if ent_objs else None,
                     )
             except Exception as e2:
-                print(f"[WARN] send retry failed for {gid}: {e2}")
+                print(f"[WARN] retry failed for {gid}: {e2}")
         except (TimedOut, NetworkError) as e:
             print(f"[WARN] Network error for group {gid}: {e}")
             await asyncio.sleep(1)
         except Exception as e:
             print(f"[WARN] send failed for {gid}: {e}")
-        await asyncio.sleep(0.5)  # کمی بیشتر برای reliability
+        await asyncio.sleep(0.5)  # small delay for reliability
+
 
 def reschedule_job(app: Application):
+    # ensure single repeating job (but allow overlap via job_kwargs if desired)
     for j in app.job_queue.get_jobs_by_name("GLOBAL_POSTER"):
         j.schedule_removal()
-    if store["enabled"]:
-        app.job_queue.run_repeating(send_to_all_groups, interval=store["seconds"], first=0, name="GLOBAL_POSTER")
 
-# ---------------- Menu & Interactive UX -------------------------------------
+    if store.get("enabled"):
+        app.job_queue.run_repeating(
+            send_to_all_groups,
+            interval=store.get("seconds", 900),
+            first=0,
+            name="GLOBAL_POSTER",
+            job_kwargs={
+                "max_instances": 1,       # change to 2+ if you want overlap
+                "coalesce": True,
+                "misfire_grace_time": 60,
+            },
+        )
+
+
+# ---------------- Menu & Interactive UX ------------------------------------
+
 MAIN_MENU = InlineKeyboardMarkup([
-    [InlineKeyboardButton("⚡ Status", callback_data="m:status"),
-     InlineKeyboardButton("✅ Enable", callback_data="m:enable"),
-     InlineKeyboardButton("⏹️ Disable", callback_data="m:disable")],
-    [InlineKeyboardButton("⏰ Interval", callback_data="m:interval"),
-     InlineKeyboardButton("✍️ Message", callback_data="m:message")],
-    [InlineKeyboardButton("🖼️ Photo", callback_data="m:photo"),
-     InlineKeyboardButton("🔘 Buttons", callback_data="m:buttons")],
-    [InlineKeyboardButton("👥 Groups", callback_data="m:groups"),
-     InlineKeyboardButton("❓ Help", callback_data="m:help")]
+    [
+        InlineKeyboardButton("⚡ Status", callback_data="m:status"),
+        InlineKeyboardButton("✅ Enable", callback_data="m:enable"),
+        InlineKeyboardButton("⏹️ Disable", callback_data="m:disable"),
+    ],
+    [
+        InlineKeyboardButton("⏰ Interval", callback_data="m:interval"),
+        InlineKeyboardButton("✍️ Message", callback_data="m:message"),
+    ],
+    [
+        InlineKeyboardButton("🖼️ Photo", callback_data="m:photo"),
+        InlineKeyboardButton("🔘 Buttons", callback_data="m:buttons"),
+    ],
+    [
+        InlineKeyboardButton("👥 Groups", callback_data="m:groups"),
+        InlineKeyboardButton("❓ Help", callback_data="m:help"),
+    ],
 ])
 
-def back_menu_kb():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="m:menu")]])
 
-def status_text():
-    mins = store["seconds"] // 60
-    btns = "\n".join([f"▫️ {l} → {u}" for l, u in store["buttons"]]) or "-"
-    return (
-        f"✨ <b>Status:</b> {'Enabled ✅' if store['enabled'] else 'Disabled ⏹️'}\n"
-        f"⏰ Interval: <code>{store['seconds']}</code> sec (~{mins} min)\n"
-        f"🖼️ Photo: <code>{store['photo'] or 'None'}</code>\n"
-        f"✍️ Message:\n<code>{store['message']}</code>\n"
-        f"\n🔘 Buttons:\n{btns}\n"
-        f"\n👥 Groups count: <b>{len(store['groups'])}</b>"
+def back_menu_kb():
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🔙 Back to Menu", callback_data="m:menu")]]
     )
+
+
+def status_text() -> str:
+    mins = store.get("seconds", 0) // 60
+    btns = "\n".join([f"▫️ {l} → {u}" for l, u in store.get("buttons", [])]) or "-"
+    return (
+        f"✨ <b>Status:</b> {'Enabled ✅' if store.get('enabled') else 'Disabled ⏹️'}\n"
+        f"⏰ Interval: <code>{store.get('seconds')}</code> sec (~{mins} min)\n"
+        f"🖼️ Photo: <code>{store.get('photo') or 'None'}</code>\n"
+        f"✍️ Message:\n<code>{(store.get('message') or '').replace('<','&lt;').replace('>','&gt;')}</code>\n"
+        f"\n🔘 Buttons:\n{btns}\n"
+        f"\n👥 Groups count: <b>{len(store.get('groups', []))}</b>"
+    )
+
+
+# ---------------- Owner-only Commands --------------------------------------
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
     if not is_owner(update):
-        return await update.message.reply_text("Hi! Only bot owners can change settings.")
-    await update.message.reply_text("🌟 Bot Management Menu:", reply_markup=MAIN_MENU, parse_mode="HTML")
+        await update.message.reply_text("Hi! Only bot owners can change settings.")
+        return
+    await update.message.reply_text(
+        "🌟 Bot Management Menu:", reply_markup=MAIN_MENU, parse_mode="HTML"
+    )
+
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update): return
-    await update.message.reply_text("🌟 Bot Management Menu:", reply_markup=MAIN_MENU, parse_mode="HTML")
+    if not is_owner(update):
+        return
+    await update.message.reply_text(
+        "🌟 Bot Management Menu:", reply_markup=MAIN_MENU, parse_mode="HTML"
+    )
+
+
+# ---------------- Callback Query (Menu) ------------------------------------
 
 async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not (update.effective_user and update.effective_user.id in OWNER_IDS):
         return
+
     q = update.callback_query
-    data = q.data or ""
+    data = (q.data or "").strip()
     context.user_data.clear()
 
-    try: await q.answer()
-    except Exception: pass
+    try:
+        await q.answer()
+    except Exception:
+        pass
 
-    def safe_edit(text, **kwargs):
-        try: return q.edit_message_text(text, **kwargs)
+    async def safe_edit(text: str, **kwargs):
+        try:
+            return await q.edit_message_text(text, **kwargs)
         except BadRequest as e:
-            if "Message is not modified" in str(e): return
-            else: raise
+            if "Message is not modified" in str(e):
+                return
+            raise
 
     if data == "m:status":
         await safe_edit(status_text(), reply_markup=MAIN_MENU, parse_mode="HTML")
         return
+
     if data == "m:enable":
-        store["enabled"] = True; save_store(); reschedule_job(context.application)
+        store["enabled"] = True
+        save_store()
+        reschedule_job(context.application)
         await safe_edit("Auto-posting enabled ✅", reply_markup=MAIN_MENU)
         return
+
     if data == "m:disable":
-        store["enabled"] = False; save_store(); reschedule_job(context.application)
+        store["enabled"] = False
+        save_store()
+        reschedule_job(context.application)
         await safe_edit("Auto-posting disabled ⏹️", reply_markup=MAIN_MENU)
         return
+
     if data == "m:interval":
+        context.user_data["mode"] = "set_interval"
         await safe_edit(
-            "⏰ Please send the interval (e.g. 15m, 2h, 90)\nMinimum is 60 seconds.",
-            reply_markup=back_menu_kb()
+            "Send new interval. Examples: <code>900</code> (sec) / <code>15m</code> / <code>2h</code>",
+            reply_markup=back_menu_kb(),
+            parse_mode="HTML",
         )
-        context.user_data["awaiting_interval"] = True
         return
+
     if data == "m:message":
+        context.user_data["mode"] = "set_message"
         await safe_edit(
-            "✍️ Please send the new message (Telegram formatting preserved).\nایموجی پریمیوم هم پشتیبانی می‌شود.",
-            reply_markup=back_menu_kb()
+            "Send the new message text. HTML entities are ignored (use entities JSON for formatting).",
+            reply_markup=back_menu_kb(),
         )
-        context.user_data["awaiting_message"] = True
         return
+
     if data == "m:photo":
+        context.user_data["mode"] = "set_photo"
         await safe_edit(
-            "🖼️ Send photo link, file_id or 'none'.",
-            reply_markup=back_menu_kb()
+            "Send a photo (as photo upload) to set. Send 'none' to clear.",
+            reply_markup=back_menu_kb(),
         )
-        context.user_data["awaiting_photo"] = True
         return
+
     if data == "m:buttons":
-        btns = "\n".join([f"▫️ {l} → {u}" for l, u in store["buttons"]]) or "None"
-        kb = [
-            [InlineKeyboardButton("➕ Add Button", callback_data="b:add")],
-            [InlineKeyboardButton("🧹 Clear All Buttons", callback_data="b:clear")],
-        ] + [
-            [InlineKeyboardButton(f"❌ Remove: {label}", callback_data=f"b:del:{i}")]
-            for i, (label, url) in enumerate(store["buttons"])
-        ]
-        kb += [[InlineKeyboardButton("🔙 Back to Menu", callback_data="m:menu")]]
-        await safe_edit(f"🔘 Current buttons:\n{btns}\n\nUse buttons below to manage.", reply_markup=InlineKeyboardMarkup(kb))
+        context.user_data["mode"] = "set_buttons"
+        await safe_edit(
+            (
+                "Send buttons list as JSON array of [label, url].\n"
+                "Example: [[\"Open\", \"https://example.com\"],[\"Docs\", \"https://docs\"]]"
+            ),
+            reply_markup=back_menu_kb(),
+        )
         return
+
     if data == "m:groups":
-        ids = store.get("groups", [])
-        kb = [
-            [InlineKeyboardButton("➕ Add Group", callback_data="g:add")],
-        ] + [
-            [InlineKeyboardButton(f"❌ Remove {gid}", callback_data=f"g:del:{gid}")]
-            for gid in ids
-        ]
-        kb += [[InlineKeyboardButton("🔙 Back to Menu", callback_data="m:menu")]]
-        txt = "No groups added yet.\nUse the button below to add." if not ids else "👥 Added Groups:\n" + "\n".join([str(x) for x in ids]) + "\n\nUse buttons below to manage."
-        await safe_edit(txt, reply_markup=InlineKeyboardMarkup(kb))
+        context.user_data["mode"] = "set_groups"
+        await safe_edit(
+            (
+                "Send chat references (one per line). Examples: -100123..., @publicname, or t.me/c/<id>.\n"
+                "Use prefix '-' to remove."
+            ),
+            reply_markup=back_menu_kb(),
+        )
         return
+
     if data == "m:help":
         await safe_edit(
-            """❓ Quick Guide:
-• Add Group: Button or /add_group_link
-• Set Message: Button or /set_message
-• Set Interval: Button or /set_interval
-• Set Photo: Button or /set_photo
-• Manage Buttons: Button or /set_buttons
-• Enable/Disable: Related buttons
-• Remove Group: Remove button beside each group
-• Remove Button: Remove button beside each button
-• ایموجی پریمیوم نیز پشتیبانی می‌شود.
-""",
-            reply_markup=back_menu_kb()
+            (
+                "<b>Help</b>\n\n"
+                "- Use the menu to configure interval/message/photo/buttons/groups.\n"
+                "- Entities: put JSON in settings file under 'entities' or use /entities command.\n"
+                "- Premium emoji: set entity with type='custom_emoji' and custom_emoji_id.\n"
+                "- JobQueue skips mean previous run still executing; increase interval or allow overlap.\n"
+            ),
+            reply_markup=MAIN_MENU,
+            parse_mode="HTML",
         )
         return
+
     if data == "m:menu":
-        await safe_edit("🌟 Bot Management Menu:", reply_markup=MAIN_MENU, parse_mode="HTML")
+        await safe_edit("🌟 Bot Management Menu:", reply_markup=MAIN_MENU)
         return
 
-    # BUTTONS management
-    if data.startswith("b:add"):
-        await safe_edit(
-            "To add a button, send: Label|https://url",
-            reply_markup=back_menu_kb()
-        )
-        context.user_data["awaiting_button"] = True
-        return
-    if data.startswith("b:del:"):
-        idx = int(data.split(":")[2])
-        if 0 <= idx < len(store["buttons"]):
-            store["buttons"].pop(idx); save_store()
-        btns = "\n".join([f"▫️ {l} → {u}" for l, u in store["buttons"]]) or "None"
-        kb = [
-            [InlineKeyboardButton("➕ Add Button", callback_data="b:add")],
-            [InlineKeyboardButton("🧹 Clear All Buttons", callback_data="b:clear")],
-        ] + [
-            [InlineKeyboardButton(f"❌ Remove: {label}", callback_data=f"b:del:{i}")]
-            for i, (label, url) in enumerate(store["buttons"])
-        ]
-        kb += [[InlineKeyboardButton("🔙 Back to Menu", callback_data="m:menu")]]
-        await safe_edit(f"🔘 Current buttons:\n{btns}\n\nUse buttons below to manage.", reply_markup=InlineKeyboardMarkup(kb))
-        return
-    if data.startswith("b:clear"):
-        store["buttons"] = []; save_store()
-        kb = [
-            [InlineKeyboardButton("➕ Add Button", callback_data="b:add")],
-            [InlineKeyboardButton("🔙 Back to Menu", callback_data="m:menu")]
-        ]
-        await safe_edit("All buttons cleared. You can add new ones.", reply_markup=InlineKeyboardMarkup(kb))
+
+# ---------------- Text/Photo Input Handler (Owner DM) ----------------------
+
+async def owner_dm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update):
         return
 
-    # GROUPS management
-    if data.startswith("g:add"):
-        await safe_edit(
-            "Please send the group link, @username or id to add.\nYou can send multiple links/IDs, one per line.",
-            reply_markup=back_menu_kb()
-        )
-        context.user_data["awaiting_group"] = True
-        return
-    if data.startswith("g:del:"):
-        gid = int(data.split(":")[2])
-        if gid in store["groups"]:
-            store["groups"].remove(gid); save_store()
-        ids = store.get("groups", [])
-        kb = [
-            [InlineKeyboardButton("➕ Add Group", callback_data="g:add")],
-        ] + [
-            [InlineKeyboardButton(f"❌ Remove {gid}", callback_data=f"g:del:{gid}")]
-            for gid in ids
-        ]
-        kb += [[InlineKeyboardButton("🔙 Back to Menu", callback_data="m:menu")]]
-        txt = "No groups added yet.\nUse the button below to add." if not ids else "👥 Added Groups:\n" + ("\n".join([str(x) for x in ids]) if ids else "None") + "\n\nUse buttons below to manage."
-        await safe_edit(txt, reply_markup=InlineKeyboardMarkup(kb))
+    mode = context.user_data.get("mode")
+    if not mode:
         return
 
-# ---------------- Interactive text input (bulk group support + premium emoji) ---------------
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update): return
-    msg = update.message
-    if msg.text and msg.text.strip().lower() == "/menu":
-        context.user_data.clear()
-        await cmd_menu(update, context)
-        return
-    # INTERVAL input
-    if context.user_data.get("awaiting_interval"):
-        interval = msg.text.strip()
-        try:
-            seconds = parse_interval(interval)
-            if seconds < 60:
-                await msg.reply_text("Minimum interval is 60 seconds.", reply_markup=back_menu_kb())
+    msg = update.effective_message
+
+    try:
+        if mode == "set_interval":
+            secs = parse_interval(msg.text or "")
+            if secs < 10:
+                raise ValueError("Interval too small (>=10s)")
+            store["seconds"] = int(secs)
+            save_store()
+            reschedule_job(context.application)
+            await msg.reply_text(f"Interval set to {secs} sec ✅", reply_markup=MAIN_MENU)
+            context.user_data.clear()
+            return
+
+        if mode == "set_message":
+            store["message"] = msg.text_html or msg.text or ""
+            save_store()
+            await msg.reply_text("Message updated ✅", reply_markup=MAIN_MENU)
+            context.user_data.clear()
+            return
+
+        if mode == "set_photo":
+            if msg.photo:
+                file_id = msg.photo[-1].file_id
+                store["photo"] = file_id
+                save_store()
+                await msg.reply_text("Photo updated ✅", reply_markup=MAIN_MENU)
             else:
-                store["seconds"] = seconds; save_store(); reschedule_job(context.application)
-                await msg.reply_text(f"Interval saved: {seconds} seconds ⏱️", reply_markup=MAIN_MENU)
-        except Exception as e:
-            await msg.reply_text(f"Invalid format: {e}", reply_markup=back_menu_kb())
-        context.user_data.clear()
+                txt = (msg.text or "").strip().lower()
+                if txt in {"none", "clear", "remove"}:
+                    store["photo"] = None
+                    save_store()
+                    await msg.reply_text("Photo cleared ✅", reply_markup=MAIN_MENU)
+                else:
+                    await msg.reply_text("Please send an actual photo upload, or 'none' to clear.")
+            context.user_data.clear()
+            return
+
+        if mode == "set_buttons":
+            raw = msg.text or ""
+            btns = json.loads(raw)
+            if not isinstance(btns, list):
+                raise ValueError("JSON must be a list of [label, url]")
+            norm: List[List[str]] = []
+            for item in btns:
+                if not (isinstance(item, list) and len(item) == 2):
+                    raise ValueError("Each item must be [label, url]")
+                norm.append([str(item[0]), str(item[1])])
+            store["buttons"] = norm
+            save_store()
+            await msg.reply_text("Buttons updated ✅", reply_markup=MAIN_MENU)
+            context.user_data.clear()
+            return
+
+        if mode == "set_groups":
+            lines = (msg.text or "").splitlines()
+            added, removed, errors = [], [], []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    removing = line.startswith("-")
+                    ref = _normalize_chat_ref(line[1:] if removing else line)
+                    gid = await _resolve_chat_id(context, ref)
+                    if removing:
+                        if gid in store["groups"]:
+                            store["groups"].remove(gid)
+                            removed.append(gid)
+                    else:
+                        if gid not in store["groups"]:
+                            store["groups"].append(gid)
+                            added.append(gid)
+                except Exception as e:
+                    errors.append(f"{line} → {e}")
+            save_store()
+            summary = (
+                (f"Added: {len(added)}\n" if added else "")
+                + (f"Removed: {len(removed)}\n" if removed else "")
+                + ("Errors:\n" + "\n".join(errors) if errors else "")
+            ).strip() or "No changes"
+            await msg.reply_text(summary, reply_markup=MAIN_MENU)
+            context.user_data.clear()
+            return
+
+    except Exception as e:
+        await msg.reply_text(f"Error: {e}")
         return
-    # MESSAGE input (entities preserved, including premium emoji)
-    if context.user_data.get("awaiting_message"):
-        raw = msg.text or ""
-        text = raw
-        ents = []
-        if msg.entities:
-            for e in msg.entities:
-                if e.type == "bot_command": continue
-                d = {
-                    "type": e.type,
-                    "offset": e.offset,
-                    "length": e.length
-                }
-                if e.url: d["url"] = e.url
-                if e.language: d["language"] = e.language
-                # پشتیبانی ایموجی پریمیوم
-                if hasattr(e, "custom_emoji_id") and e.custom_emoji_id:
-                    d["custom_emoji_id"] = e.custom_emoji_id
-                ents.append(d)
-        store["message"] = text
+
+
+# ---------------- Optional: /entities command ------------------------------
+
+async def cmd_entities(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update):
+        return
+    # Expect a JSON after command or in next message if empty
+    if context.args:
+        raw = " ".join(context.args)
+        try:
+            ents = json.loads(raw)
+            if not isinstance(ents, list):
+                raise ValueError("JSON must be a list of MessageEntity dicts")
+            store["entities"] = ents
+            save_store()
+            await update.message.reply_text("Entities updated ✅")
+        except Exception as e:
+            await update.message.reply_text(f"Parse error: {e}")
+    else:
+        await update.message.reply_text(
+            (
+                "Send JSON (list of MessageEntity dicts) in the next message.\n"
+                "Minimal example:\n"
+                "[{'type':'bold','offset':0,'length':5}, {'type':'custom_emoji','offset':6,'length':2,'custom_emoji_id':'538...'}]"
+            )
+        )
+        context.user_data["mode"] = "set_entities_json"
+
+
+async def entities_followup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update):
+        return
+    if context.user_data.get("mode") != "set_entities_json":
+        return
+    raw = update.effective_message.text or ""
+    try:
+        ents = json.loads(raw)
+        if not isinstance(ents, list):
+            raise ValueError("JSON must be a list")
         store["entities"] = ents
         save_store()
-        await msg.reply_text("New message saved ✍️\nایموجی پریمیوم نیز پشتیبانی می‌شود.", reply_markup=MAIN_MENU)
+        await update.effective_message.reply_text("Entities updated ✅", reply_markup=MAIN_MENU)
         context.user_data.clear()
-        return
-    # PHOTO input
-    if context.user_data.get("awaiting_photo"):
-        arg = msg.text.strip()
-        store["photo"] = None if arg.lower() == "none" else arg
-        save_store()
-        await msg.reply_text("Photo saved 🖼️", reply_markup=MAIN_MENU)
-        context.user_data.clear()
-        return
-    # BUTTON input
-    if context.user_data.get("awaiting_button"):
-        try:
-            label, url = [x.strip() for x in msg.text.split("|", 1)]
-            if (not label) or (not (url.startswith("http://") or url.startswith("https://"))):
-                raise Exception()
-        except Exception:
-            await msg.reply_text("Bad format. Example: Shop|https://t.me/YourBot", reply_markup=back_menu_kb())
-            return
-        if len(store["buttons"]) >= 8:
-            await msg.reply_text("Maximum 8 buttons allowed.", reply_markup=back_menu_kb())
-            return
-        store["buttons"].append([label, url]); save_store()
-        await msg.reply_text("Button added ➕", reply_markup=MAIN_MENU)
-        context.user_data.clear()
-        return
-    # GROUP input (bulk support)
-    if context.user_data.get("awaiting_group"):
-        lines = msg.text.strip().splitlines()
-        added = []
-        errors = []
-        for inp in lines:
-            inp = inp.strip()
-            if not inp:
-                continue
-            try:
-                ref = _normalize_chat_ref(inp)
-                gid = await _resolve_chat_id(context, ref)
-                if gid not in store["groups"]:
-                    store["groups"].append(gid)
-                    added.append(str(gid))
-            except Exception as e:
-                errors.append(f"{inp}: {e}")
-        save_store()
-        reply = ""
-        if added:
-            reply += f"Groups added ✅:\n" + "\n".join(added) + "\n"
-        if errors:
-            reply += "\nErrors:\n" + "\n".join(errors)
-        if not added and not errors:
-            reply = "No valid groups found."
-        await msg.reply_text(reply, reply_markup=MAIN_MENU)
-        context.user_data.clear()
-        return
+    except Exception as e:
+        await update.effective_message.reply_text(f"Parse error: {e}")
 
-# ---------------- Group tracking (auto) -------------------------------------
-async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    if not chat: return
-    status = update.my_chat_member.new_chat_member.status
-    if status in ("member", "administrator", "restricted"):
-        if chat.id not in store["groups"]:
-            store["groups"].append(chat.id); save_store()
-            print(f"[INFO] Added group {chat.id}")
+
+# ---------------- Error Handler --------------------------------------------
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    print("[ERROR]", repr(context.error))
+
 
 # ---------------- Main ------------------------------------------------------
-if __name__ == "__main__":
+
+async def on_startup(app: Application):
+    # schedule keepalive ping every 5 minutes
+    app.job_queue.run_repeating(_keepalive, interval=300, first=10, name="KEEPALIVE")
+    # schedule broadcaster according to current settings
+    reschedule_job(app)
+
+
+def main():
     start_health_server()
 
-    jq = JobQueue()
-    app = Application.builder().token(TOKEN).job_queue(jq).build()
-    jq.set_application(app)
+    app = Application.builder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("menu", cmd_menu))
-    app.add_handler(CallbackQueryHandler(on_menu_cb, pattern=r".*"))
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, on_text))
-    app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
-    app.add_handler(MessageHandler(filters.COMMAND & filters.ChatType.GROUPS, lambda u, c: None))
+    # Commands
+    app.add_handler(CommandHandler(["start", "menu"], cmd_start))
+    app.add_handler(CommandHandler("entities", cmd_entities))
 
-    reschedule_job(app)
-    app.job_queue.run_repeating(_keepalive, interval=240, first=10, name="KEEPALIVE")
+    # Menu callbacks
+    app.add_handler(CallbackQueryHandler(on_menu_cb, pattern=r"^m:"))
 
-    print("Bot is running…")
-    app.run_polling()
+    # Owner DM inputs (text & photos)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.ALL, owner_dm_handler), group=1)
+    # entities followup has to run before generic owner handler when in that mode
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, entities_followup), group=0)
+
+    # Errors
+    app.add_error_handler(on_error)
+
+    # Startup hooks
+    app.post_init = on_startup  # PTB automatically awaits this coroutine on start
+
+    # Run (polling is simplest and Render-friendly since we keep a health port open)
+    app.run_polling(allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"])  # minimal set
+
+
+if __name__ == "__main__":
+    main()
