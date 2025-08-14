@@ -200,6 +200,28 @@ def _ent_to_dict(e: MessageEntity) -> dict:
         "custom_emoji_id": getattr(e, "custom_emoji_id", None),
     }
 
+# --- /import : reply to a message to import its text/caption + entities (+photo) ---
+async def cmd_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update):
+        return
+    src = update.message.reply_to_message
+    if not src:
+        await update.message.reply_text("Reply /import to the target message (with premium emoji)")
+        return
+
+    text = src.text or src.caption or ""
+    ents = src.entities or src.caption_entities or []
+
+    store["message"] = text
+    store["entities"] = [_ent_to_dict(e) for e in ents]
+
+    if src.photo:
+        store["photo"] = src.photo[-1].file_id
+
+    save_store()
+    reschedule_job(context.application)
+    await update.message.reply_text("Imported ✅ (message, entities, photo if any)")
+
 
 # ---------------- Broadcaster (entities support + throttling) --------------
 
@@ -638,6 +660,7 @@ def main():
     # Commands
     app.add_handler(CommandHandler(["start", "menu"], cmd_start))
     app.add_handler(CommandHandler("entities", cmd_entities))
+    app.add_handler(CommandHandler("import", cmd_import))
 
     # Menu callbacks
     app.add_handler(CallbackQueryHandler(on_menu_cb, pattern=r"^m:"))
