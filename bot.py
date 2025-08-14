@@ -579,28 +579,21 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "m:mode":
         store["use_forward"] = not store.get("use_forward"); save_store()
         await safe_edit(f"Mode switched to <b>{mode_badge()}</b>.", reply_markup=MAIN_MENU, parse_mode="HTML"); return
-    if data == "m:help":
+        if data == "m:help":
         await safe_edit(
             (
-                "<b>Help & Tips</b>
-
-"
-                "- /import: Reply to your template to capture it.
-"
-                "- /forward: Reply to a message → forward to all groups, then send buttons under it.
-"
-                "- Copy mode supports buttons attached; Forward mode uses a reply-with-buttons.
-"
-                "- Premium emojis are preserved (via copy/forward).
-"
-                "- /attach and /detach let you add/remove inline buttons directly on the original channel post.
-"
-                "- Tip: use /mode copy or /mode forward to switch quickly.
-"
+                "<b>Help & tips</b>\n\n"
+                "- /import: Reply to your template to capture it.\n"
+                "- /forward: Reply to a message → forward to all groups, then send buttons under it.\n"
+                "- Copy mode supports buttons attached; Forward mode uses a reply-with-buttons.\n"
+                "- Premium emojis are preserved (via copy/forward).\n"
+                "- /attach and /detach let you add/remove inline buttons directly on the original channel post.\n"
+                "- Tip: use /mode copy or /mode forward to switch quickly.\n"
             ),
             reply_markup=MAIN_MENU,
             parse_mode="HTML",
-        ); return 
+        ); return
+
     if data == "m:menu":
         await safe_edit("🌟 Bot Management Menu:", reply_markup=MAIN_MENU); return
 
