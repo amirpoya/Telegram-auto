@@ -268,48 +268,20 @@ def build_keyboard() -> InlineKeyboardMarkup | None:
 # ---------------- Broadcaster ----------------
 
 INVISIBLE = "\u2060"  # zero-width no-break space (sticks tight, no preview)
+# --- PATCH START: per-group lock + isolated sender ---
+# برای جلوگیری از اثرگذاری خطای یک گروه روی بقیه
+group_locks: dict[int, asyncio.Lock] = {}
 
-async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
-    if not store.get("enabled"):
-        return
-
-    kb = build_keyboard()
-    tpl = store.get("template") if isinstance(store.get("template"), dict) else None
-
-    # Preferred: use saved template
-    if tpl and tpl.get("chat_id") and tpl.get("message_id"):
-        for gid in list(dict.fromkeys(store.get("groups", []))):
-            try:
+async def send_one_group(context: ContextTypes.DEFAULT_TYPE, gid: int, kb, tpl, msg_text: str, ent_objs, photo):
+    """ارسال ایمن برای یک گروه؛ با هندل RetryAfter فقط برای همان گروه و بدون بلاک کردن بقیه."""
+    lock = group_locks.setdefault(gid, asyncio.Lock())
+    async with lock:
+        try:
+            if tpl and tpl.get("chat_id") and tpl.get("message_id"):
+                # Template path
                 if store.get("use_forward"):
-                    fwd = await context.bot.forward_message(
-                        chat_id=gid, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"]
-                    )
-                    # If original template already had its own keyboard, don't add ours
-                    if kb:
-                        try:
-                            await context.bot.send_message(
-                                chat_id=gid,
-                                text=INVISIBLE,
-                                reply_markup=kb,
-                                reply_parameters=ReplyParameters(
-                                    message_id=fwd.message_id,
-                                    allow_sending_without_reply=True,
-                                    quote=False,
-                                ),
-                            )
-                        except Exception as e2:
-                            print(f"[WARN] buttons failed for {gid}: {e2}")
-                else:
-                    await context.bot.copy_message(
-                        chat_id=gid,
-                        from_chat_id=tpl["chat_id"],
-                        message_id=tpl["message_id"],
-                        reply_markup=kb,
-                    )
-            except RetryAfter as e:
-                await asyncio.sleep(int(e.retry_after) + 1)
-                try:
-                    if store.get("use_forward"):
+                    # FORWARD + (اختیاری) ارسال دکمه‌ها به عنوان ریپلای نامرئی
+                    try:
                         fwd = await context.bot.forward_message(
                             chat_id=gid, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"]
                         )
@@ -326,18 +298,118 @@ async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
                                     ),
                                 )
                             except Exception as e2:
-                                print(f"[WARN] buttons failed (retry) for {gid}: {e2}")
-                    else:
+                                print(f"[WARN] buttons failed for {gid}: {e2}")
+                    except RetryAfter as e:
+                        # فقط همین گروه می‌خوابه
+                        await asyncio.sleep(int(e.retry_after) + 1)
+                        # یک بار دیگر امتحان
+                        try:
+                            fwd = await context.bot.forward_message(
+                                chat_id=gid, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"]
+                            )
+                            if kb:
+                                try:
+                                    await context.bot.send_message(
+                                        chat_id=gid,
+                                        text=INVISIBLE,
+                                        reply_markup=kb,
+                                        reply_parameters=ReplyParameters(
+                                            message_id=fwd.message_id,
+                                            allow_sending_without_reply=True,
+                                            quote=False,
+                                        ),
+                                    )
+                                except Exception as e2:
+                                    print(f"[WARN] buttons failed (retry) for {gid}: {e2}")
+                        except Exception as e2:
+                            print(f"[WARN] retry failed for {gid}: {e2}")
+                    except (TimedOut, NetworkError) as e:
+                        print(f"[WARN] Network error for group {gid}: {e}")
+                        await asyncio.sleep(1)
+                else:
+                    # COPY (با امکان الصاق کیبورد)
+                    try:
                         await context.bot.copy_message(
-                            chat_id=gid, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"], reply_markup=kb
+                            chat_id=gid,
+                            from_chat_id=tpl["chat_id"],
+                            message_id=tpl["message_id"],
+                            reply_markup=kb,
                         )
-                except Exception as e2:
-                    print(f"[WARN] retry failed for {gid}: {e2}")
-            except (TimedOut, NetworkError) as e:
-                print(f"[WARN] Network error for group {gid}: {e}")
-                await asyncio.sleep(1)
-            except Exception as e:
-                print(f"[WARN] send failed for {gid}: {e}")
+                    except RetryAfter as e:
+                        await asyncio.sleep(int(e.retry_after) + 1)
+                        try:
+                            await context.bot.copy_message(
+                                chat_id=gid,
+                                from_chat_id=tpl["chat_id"],
+                                message_id=tpl["message_id"],
+                                reply_markup=kb,
+                            )
+                        except Exception as e2:
+                            print(f"[WARN] retry failed for {gid}: {e2}")
+                    except (TimedOut, NetworkError) as e:
+                        print(f"[WARN] Network error for group {gid}: {e}")
+                        await asyncio.sleep(1)
+            else:
+                # Fallback path (text/photo/entities)
+                try:
+                    if photo:
+                        await context.bot.send_photo(
+                            chat_id=gid, photo=photo, caption=msg_text,
+                            reply_markup=kb, caption_entities=ent_objs if ent_objs else None,
+                        )
+                    else:
+                        await context.bot.send_message(
+                            chat_id=gid, text=msg_text,
+                            reply_markup=kb, entities=ent_objs if ent_objs else None,
+                        )
+                except RetryAfter as e:
+                    await asyncio.sleep(int(e.retry_after) + 1)
+                    try:
+                        if photo:
+                            await context.bot.send_photo(
+                                chat_id=gid, photo=photo, caption=msg_text,
+                                reply_markup=kb, caption_entities=ent_objs if ent_objs else None,
+                            )
+                        else:
+                            await context.bot.send_message(
+                                chat_id=gid, text=msg_text,
+                                reply_markup=kb, entities=ent_objs if ent_objs else None,
+                            )
+                    except Exception as e2:
+                        print(f"[WARN] retry failed for {gid}: {e2}")
+                except (TimedOut, NetworkError) as e:
+                    print(f"[WARN] Network error for group {gid}: {e}")
+                    await asyncio.sleep(1)
+        except Exception as e:
+            print(f"[WARN] send failed for {gid}: {e}")
+# --- PATCH END ---
+
+# --- PATCH START: concurrent per-group scheduling ---
+async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
+    if not store.get("enabled"):
+        return
+
+    kb = build_keyboard()
+    tpl = store.get("template") if isinstance(store.get("template"), dict) else None
+
+    # برای fallback آماده‌سازی کنیم (اگر لازم شد)
+    msg_text: str = store.get("message", "") or ""
+    photo = store.get("photo")
+    ent_objs = await _build_entities_from_store()
+
+    groups = list(dict.fromkeys(store.get("groups", [])))
+    if not groups:
+        return
+
+    # هر گروه به‌صورت ایزوله ارسال می‌شود—بدون بلاک کردن بقیه
+    for gid in groups:
+        try:
+            asyncio.create_task(
+                send_one_group(context=context, gid=gid, kb=kb, tpl=tpl,
+                               msg_text=msg_text, ent_objs=ent_objs, photo=photo)
+            )
+        except Exception as e:
+            print(f"[WARN] scheduling failed for {gid}: {e}")
             await asyncio.sleep(0.5)
         return
 
