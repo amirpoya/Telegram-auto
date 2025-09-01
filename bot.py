@@ -28,12 +28,14 @@ ENV REQUIRED:
   OWNER_IDS   = "123,456"   (comma separated user ids)
 OPTIONAL:
   PUBLIC_URL  = https://telegram-auto.onrender.com   (for keepalive pings)
+  LOG_LEVEL   = INFO | DEBUG | WARNING
 """
 
 from __future__ import annotations
 import os, re, json, asyncio, threading, http.server, socketserver
 from typing import List, Dict, Any, Union
 from urllib.parse import urlparse
+import logging, sys
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, ReplyParameters, InlineQueryResultArticle, InputTextMessageContent
 from telegram.error import RetryAfter, TimedOut, NetworkError, BadRequest
@@ -44,11 +46,20 @@ from telegram.ext import (
 import aiohttp
 import uuid
 
+# ---------------- Logging ----------------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+log = logging.getLogger("global_poster")
+
 # ---------------- Health server (Render) ----------------
 
 def start_health_server():
     port = int(os.environ.get("PORT", "10000"))
-    print("Health server binding on PORT =", port, flush=True)
+    log.info("Health server binding on PORT = %s", port)
 
     class Handler(http.server.SimpleHTTPRequestHandler):
         def do_GET(self):
@@ -61,6 +72,7 @@ def start_health_server():
     def serve():
         with socketserver.TCPServer(("", port), Handler) as httpd:
             httpd.allow_reuse_address = True
+            log.info("Health server started on port %s", port)
             httpd.serve_forever()
     threading.Thread(target=serve, daemon=True).start()
 
@@ -75,8 +87,9 @@ async def _keepalive(context: ContextTypes.DEFAULT_TYPE):
         async with aiohttp.ClientSession(timeout=timeout) as s:
             async with s.get(url) as r:
                 await r.read()
-    except Exception:
-        pass
+        log.debug("Keepalive ping ok: %s", url)
+    except Exception as e:
+        log.debug("Keepalive ping failed: %s", e)
 
 # ---------------- Credentials ----------------
 
@@ -106,7 +119,8 @@ def load_store() -> Dict[str, Any]:
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except Exception:
+        except Exception as e:
+            log.warning("Failed to read %s: %s", DATA_FILE, e)
             data = {}
     else:
         data = {}
@@ -129,8 +143,11 @@ def load_store() -> Dict[str, Any]:
 store: Dict[str, Any] = load_store()
 
 def save_store() -> None:
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(store, f, ensure_ascii=False, indent=2)
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(store, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.error("Failed to write %s: %s", DATA_FILE, e)
 
 # ---------------- Helpers ----------------
 
@@ -268,7 +285,6 @@ def build_keyboard() -> InlineKeyboardMarkup | None:
 # ---------------- Broadcaster ----------------
 
 INVISIBLE = "\u2060"  # zero-width no-break space (sticks tight, no preview)
-# --- PATCH START: per-group lock + isolated sender ---
 # برای جلوگیری از اثرگذاری خطای یک گروه روی بقیه
 group_locks: dict[int, asyncio.Lock] = {}
 
@@ -276,7 +292,11 @@ async def send_one_group(context: ContextTypes.DEFAULT_TYPE, gid: int, kb, tpl, 
     """ارسال ایمن برای یک گروه؛ با هندل RetryAfter فقط برای همان گروه و بدون بلاک کردن بقیه."""
     lock = group_locks.setdefault(gid, asyncio.Lock())
     async with lock:
+        mode = "FORWARD" if store.get("use_forward") else "COPY"
         try:
+            log.info("Send-> group=%s mode=%s tpl=%s kb=%s photo=%s",
+                     gid, mode, bool(tpl), bool(kb), bool(photo))
+
             if tpl and tpl.get("chat_id") and tpl.get("message_id"):
                 # Template path
                 if store.get("use_forward"):
@@ -298,11 +318,10 @@ async def send_one_group(context: ContextTypes.DEFAULT_TYPE, gid: int, kb, tpl, 
                                     ),
                                 )
                             except Exception as e2:
-                                print(f"[WARN] buttons failed for {gid}: {e2}")
+                                log.warning("buttons failed for %s: %s", gid, e2)
                     except RetryAfter as e:
-                        # فقط همین گروه می‌خوابه
+                        log.warning("Rate limit for %s: sleep %s sec", gid, e.retry_after)
                         await asyncio.sleep(int(e.retry_after) + 1)
-                        # یک بار دیگر امتحان
                         try:
                             fwd = await context.bot.forward_message(
                                 chat_id=gid, from_chat_id=tpl["chat_id"], message_id=tpl["message_id"]
@@ -320,11 +339,11 @@ async def send_one_group(context: ContextTypes.DEFAULT_TYPE, gid: int, kb, tpl, 
                                         ),
                                     )
                                 except Exception as e2:
-                                    print(f"[WARN] buttons failed (retry) for {gid}: {e2}")
+                                    log.warning("buttons failed (retry) for %s: %s", gid, e2)
                         except Exception as e2:
-                            print(f"[WARN] retry failed for {gid}: {e2}")
+                            log.warning("forward retry failed for %s: %s", gid, e2)
                     except (TimedOut, NetworkError) as e:
-                        print(f"[WARN] Network error for group {gid}: {e}")
+                        log.warning("Network error (forward) group %s: %s", gid, e)
                         await asyncio.sleep(1)
                 else:
                     # COPY (با امکان الصاق کیبورد)
@@ -336,6 +355,7 @@ async def send_one_group(context: ContextTypes.DEFAULT_TYPE, gid: int, kb, tpl, 
                             reply_markup=kb,
                         )
                     except RetryAfter as e:
+                        log.warning("Rate limit for %s: sleep %s sec", gid, e.retry_after)
                         await asyncio.sleep(int(e.retry_after) + 1)
                         try:
                             await context.bot.copy_message(
@@ -345,9 +365,9 @@ async def send_one_group(context: ContextTypes.DEFAULT_TYPE, gid: int, kb, tpl, 
                                 reply_markup=kb,
                             )
                         except Exception as e2:
-                            print(f"[WARN] retry failed for {gid}: {e2}")
+                            log.warning("copy retry failed for %s: %s", gid, e2)
                     except (TimedOut, NetworkError) as e:
-                        print(f"[WARN] Network error for group {gid}: {e}")
+                        log.warning("Network error (copy) group %s: %s", gid, e)
                         await asyncio.sleep(1)
             else:
                 # Fallback path (text/photo/entities)
@@ -363,6 +383,7 @@ async def send_one_group(context: ContextTypes.DEFAULT_TYPE, gid: int, kb, tpl, 
                             reply_markup=kb, entities=ent_objs if ent_objs else None,
                         )
                 except RetryAfter as e:
+                    log.warning("Rate limit for %s: sleep %s sec", gid, e.retry_after)
                     await asyncio.sleep(int(e.retry_after) + 1)
                     try:
                         if photo:
@@ -376,15 +397,15 @@ async def send_one_group(context: ContextTypes.DEFAULT_TYPE, gid: int, kb, tpl, 
                                 reply_markup=kb, entities=ent_objs if ent_objs else None,
                             )
                     except Exception as e2:
-                        print(f"[WARN] retry failed for {gid}: {e2}")
+                        log.warning("fallback retry failed for %s: %s", gid, e2)
                 except (TimedOut, NetworkError) as e:
-                    print(f"[WARN] Network error for group {gid}: {e}")
+                    log.warning("Network error (fallback) group %s: %s", gid, e)
                     await asyncio.sleep(1)
-        except Exception as e:
-            print(f"[WARN] send failed for {gid}: {e}")
-# --- PATCH END ---
+        except Exception:
+            # استک‌تریس کامل
+            log.exception("Send failed for group %s", gid)
 
-# --- PATCH START: concurrent per-group scheduling ---
+# --- concurrent per-group scheduling ---
 async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
     if not store.get("enabled"):
         return
@@ -399,7 +420,13 @@ async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
 
     groups = list(dict.fromkeys(store.get("groups", [])))
     if not groups:
+        log.info("No groups configured; skipping broadcast")
         return
+
+    log.info("Broadcast start: groups=%d mode=%s tpl=%s kb=%s photo=%s",
+             len(groups),
+             "FORWARD" if store.get("use_forward") else "COPY",
+             bool(tpl), bool(kb), bool(photo))
 
     # هر گروه به‌صورت ایزوله ارسال می‌شود—بدون بلاک کردن بقیه
     for gid in groups:
@@ -408,49 +435,9 @@ async def send_to_all_groups(context: ContextTypes.DEFAULT_TYPE):
                 send_one_group(context=context, gid=gid, kb=kb, tpl=tpl,
                                msg_text=msg_text, ent_objs=ent_objs, photo=photo)
             )
-        except Exception as e:
-            print(f"[WARN] scheduling failed for {gid}: {e}")
+        except Exception:
+            log.exception("scheduling failed for %s", gid)
             await asyncio.sleep(0.5)
-        return
-
-    # Fallback: send from stored text/entities/photo
-    msg_text: str = store.get("message", "")
-    photo = store.get("photo")
-    ent_objs = await _build_entities_from_store()
-
-    for gid in list(dict.fromkeys(store.get("groups", []))):
-        try:
-            if photo:
-                await context.bot.send_photo(
-                    chat_id=gid, photo=photo, caption=msg_text,
-                    reply_markup=kb, caption_entities=ent_objs if ent_objs else None,
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=gid, text=msg_text,
-                    reply_markup=kb, entities=ent_objs if ent_objs else None,
-                )
-        except RetryAfter as e:
-            await asyncio.sleep(int(e.retry_after) + 1)
-            try:
-                if photo:
-                    await context.bot.send_photo(
-                        chat_id=gid, photo=photo, caption=msg_text,
-                        reply_markup=kb, caption_entities=ent_objs if ent_objs else None,
-                    )
-                else:
-                    await context.bot.send_message(
-                        chat_id=gid, text=msg_text,
-                        reply_markup=kb, entities=ent_objs if ent_objs else None,
-                    )
-            except Exception as e2:
-                print(f"[WARN] retry failed for {gid}: {e2}")
-        except (TimedOut, NetworkError) as e:
-            print(f"[WARN] Network error for group {gid}: {e}")
-            await asyncio.sleep(1)
-        except Exception as e:
-            print(f"[WARN] send failed for {gid}: {e}")
-        await asyncio.sleep(0.5)
 
 # ---------------- Job scheduling ----------------
 
@@ -465,6 +452,9 @@ def reschedule_job(app: Application):
             name="GLOBAL_POSTER",
             job_kwargs={"max_instances": 1, "coalesce": True, "misfire_grace_time": 60},
         )
+        log.info("Job scheduled: every %ss", store.get("seconds"))
+    else:
+        log.info("Job disabled")
 
 # ---------------- Menu & UX ----------------
 
@@ -547,7 +537,6 @@ async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Edit failed: {e}")
 
-
 async def cmd_detach(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Remove inline buttons from the ORIGINAL template post."""
     if not is_owner(update):
@@ -565,8 +554,6 @@ async def cmd_detach(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Remove failed: {e}")
     except Exception as e:
         await update.message.reply_text(f"Remove failed: {e}")
-
-# ---------------- Commands ----------------
 
 async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update):
@@ -833,8 +820,9 @@ async def cmd_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         reply_parameters=ReplyParameters(message_id=fwd_msg.message_id, allow_sending_without_reply=True, quote=False),
                     )
                 except Exception as e2:
-                    print(f"[WARN] buttons failed for {gid}: {e2}")
+                    log.warning("buttons failed for %s: %s", gid, e2)
         except RetryAfter as e:
+            log.warning("Rate limit (manual forward) %s: sleep %s sec", gid, e.retry_after)
             await asyncio.sleep(int(e.retry_after) + 1)
             try:
                 fwd_msg = await context.bot.forward_message(chat_id=gid, from_chat_id=src.chat_id, message_id=src.message_id)
@@ -848,7 +836,7 @@ async def cmd_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             reply_parameters=ReplyParameters(message_id=fwd_msg.message_id, allow_sending_without_reply=True, quote=False),
                         )
                     except Exception as e2:
-                        print(f"[WARN] buttons failed after retry for {gid}: {e2}")
+                        log.warning("buttons failed after retry for %s: %s", gid, e2)
             except Exception as e2:
                 fail.append((gid, str(e2)))
         except (TimedOut, NetworkError) as e:
@@ -928,21 +916,23 @@ async def on_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.inline_query.answer(results, cache_time=0, is_personal=True)
     except Exception as e:
-        print(f"[WARN] inline answer failed: {e}")
+        log.warning("inline answer failed: %s", e)
 
 # ---------------- Errors ----------------
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-    print("[ERROR]", repr(context.error))
+    err = context.error
+    log.error("Unhandled error: %r", err, exc_info=(type(err), err, err.__traceback__))
 
 # ---------------- Main ----------------
 async def on_startup(app: Application):
     # Ensure polling mode is clean
     try:
         await app.bot.delete_webhook(drop_pending_updates=True)
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("delete_webhook failed: %s", e)
     app.job_queue.run_repeating(_keepalive, interval=300, first=10, name="KEEPALIVE")
     reschedule_job(app)
+    log.info("Bot started")
 
 def main():
     start_health_server()
