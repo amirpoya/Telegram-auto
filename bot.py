@@ -509,6 +509,123 @@ def status_text() -> str:
         f"\n👥 Groups count: <b>{len(store.get('groups', []))}</b>"
     )
 
+# ---------- Groups Manager (List + Remove + Pagination) ----------
+GROUPS_PER_PAGE = 8
+
+def _shorten(s: str, n: int = 32) -> str:
+    s = s or ""
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+async def build_groups_page(bot, page: int = 1):
+    ids = list(dict.fromkeys(store.get("groups", [])))
+    total = len(ids)
+    per = GROUPS_PER_PAGE
+    pages = max(1, (total + per - 1) // per)
+    page = max(1, min(page, pages))
+
+    start = (page - 1) * per
+    chunk = ids[start : start + per]
+
+    rows = []
+    for gid in chunk:
+        label = str(gid)
+        try:
+            ch = await bot.get_chat(gid)
+            title = getattr(ch, "title", None) or getattr(ch, "full_name", None) or getattr(ch, "username", None) or str(gid)
+            uname = f" @{ch.username}" if getattr(ch, "username", None) else ""
+            label = _shorten(f"{title}{uname}", 32)
+        except Exception:
+            label = _shorten(f"{gid}", 32)
+
+        rows.append([
+            InlineKeyboardButton(text=label, callback_data=f"g:nop:{gid}"),
+            InlineKeyboardButton(text="❌ Remove", callback_data=f"g:del:{gid}:{page}"),
+        ])
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("◀️ Prev", callback_data=f"g:page:{page-1}"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"g:page:{page+1}"))
+
+    extras = [
+        [InlineKeyboardButton("➕ Add", callback_data="g:add")],
+    ]
+    if nav:
+        extras.append(nav)
+    extras.append([InlineKeyboardButton("🔙 Back", callback_data="m:menu")])
+
+    kb = InlineKeyboardMarkup(rows + extras)
+    txt = f"👥 Groups: {total} total • Page {page}/{pages}\nTap ❌ to remove an entry."
+    return txt, kb, page, pages
+
+async def on_groups_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not (update.effective_user and update.effective_user.id in OWNER_IDS):
+        return
+
+    q = update.callback_query
+    data = (q.data or "").strip()
+    try:
+        await q.answer()
+    except Exception:
+        pass
+
+    async def safe_edit(text: str, **kwargs):
+        try:
+            return await q.edit_message_text(text, **kwargs)
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                return
+            raise
+
+    if data.startswith("g:page:"):
+        try:
+            page = int(data.split(":")[2])
+        except Exception:
+            page = 1
+        txt, kb, _, _ = await build_groups_page(context.bot, page=page)
+        await safe_edit(txt, reply_markup=kb)
+        return
+
+    if data.startswith("g:del:"):
+        parts = data.split(":")
+        try:
+            gid = int(parts[2])
+        except Exception:
+            return
+        try:
+            page = int(parts[3]) if len(parts) > 3 else 1
+        except Exception:
+            page = 1
+
+        # Remove all occurrences of gid (just in case)
+        store["groups"] = [g for g in store.get("groups", []) if g != gid]
+        save_store()
+        try:
+            await q.answer("Removed ✅", show_alert=False)
+        except Exception:
+            pass
+
+        # Re-render page (adjust if page got empty)
+        txt, kb, page_now, pages_now = await build_groups_page(context.bot, page=page)
+        if pages_now < page:
+            txt, kb, _, _ = await build_groups_page(context.bot, page=max(1, pages_now))
+        await safe_edit(txt, reply_markup=kb)
+        return
+
+    if data.startswith("g:add"):
+        # Reuse the existing text-input flow
+        context.user_data["mode"] = "set_groups"
+        await safe_edit(
+            "Send chat refs per line:\n-100123..., @publicname, or t.me/c/<id>\nPrefix '-' to remove.\n\nExample:\n@mygroup\n-1001234567890\n- @oldgroup",
+            reply_markup=back_menu_kb(),
+        )
+        return
+
+    # no-op label button
+    if data.startswith("g:nop:"):
+        return
+
 # ---------------- Commands ----------------
 
 async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -630,11 +747,9 @@ async def on_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=back_menu_kb(), parse_mode="HTML",
         ); return
     if data == "m:groups":
-        context.user_data["mode"] = "set_groups"
-        await safe_edit(
-            "Send chat refs per line: -100123..., @publicname, or t.me/c/<id> (prefix '-' to remove)",
-            reply_markup=back_menu_kb(),
-        ); return
+        # Open Groups Manager (list + remove + pagination)
+        txt, kb, _, _ = await build_groups_page(context.bot, page=1)
+        await safe_edit(txt, reply_markup=kb); return
     if data == "m:mode":
         store["use_forward"] = not store.get("use_forward"); save_store()
         await safe_edit(f"Mode switched to <b>{mode_badge()}</b>.", reply_markup=MAIN_MENU, parse_mode="HTML"); return
@@ -948,6 +1063,8 @@ def main():
     app.add_handler(CommandHandler("mode", cmd_mode))
     # Menu callbacks
     app.add_handler(CallbackQueryHandler(on_menu_cb, pattern=r"^m:"))
+    # Groups manager callbacks
+    app.add_handler(CallbackQueryHandler(on_groups_cb, pattern=r"^g:"))
     # Inline mode
     app.add_handler(InlineQueryHandler(on_inline))
     # Owner DM inputs
